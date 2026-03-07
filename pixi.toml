@@ -1,0 +1,12 @@
+[workspace]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "json"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+test-json = "mojo run test_json.mojo"
+format = "mblack json.mojo test_json.mojo"
+
+[dependencies]
+mojo = ">=0.26.1"

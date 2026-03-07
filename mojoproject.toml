@@ -1,0 +1,11 @@
+[package]
+name = "json"
+version = "1.0.0"
+description = "Pure-Mojo JSON parser and serializer"
+license = "MIT"
+platforms = ["linux-64", "osx-arm64"]
+
+[mojo]
+requires = ">=0.26.1"
+
+[dependencies]
