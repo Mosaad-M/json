@@ -9,4 +9,4 @@ test-json = "mojo run test_json.mojo"
 format = "mblack json.mojo test_json.mojo"
 
 [dependencies]
-mojo = ">=0.26.1"
+mojo = ">=0.26.2"
