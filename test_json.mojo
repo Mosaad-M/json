@@ -10,31 +10,31 @@ from json import JsonValue, parse_json
 # ============================================================================
 
 
-fn assert_true(cond: Bool, label: String) raises:
+def assert_true(cond: Bool, label: String) raises:
     if not cond:
         raise Error(label + ": expected True, got False")
 
 
-fn assert_false(cond: Bool, label: String) raises:
+def assert_false(cond: Bool, label: String) raises:
     if cond:
         raise Error(label + ": expected False, got True")
 
 
-fn assert_int_eq(actual: Int, expected: Int, label: String) raises:
+def assert_int_eq(actual: Int, expected: Int, label: String) raises:
     if actual != expected:
         raise Error(
             label + ": expected " + String(expected) + ", got " + String(actual)
         )
 
 
-fn assert_str_eq(actual: String, expected: String, label: String) raises:
+def assert_str_eq(actual: String, expected: String, label: String) raises:
     if actual != expected:
         raise Error(
             label + ": expected '" + expected + "', got '" + actual + "'"
         )
 
 
-fn assert_float_near(
+def assert_float_near(
     actual: Float64, expected: Float64, tol: Float64, label: String
 ) raises:
     var diff = actual - expected
@@ -55,56 +55,56 @@ fn assert_float_near(
 # ============================================================================
 
 
-fn test_null() raises:
+def test_null() raises:
     var v = parse_json("null")
     assert_true(v.is_null(), "is_null")
 
 
-fn test_true() raises:
+def test_true() raises:
     var v = parse_json("true")
     assert_true(v.is_bool(), "is_bool")
     assert_true(v.as_bool(), "value")
 
 
-fn test_false() raises:
+def test_false() raises:
     var v = parse_json("false")
     assert_true(v.is_bool(), "is_bool")
     assert_false(v.as_bool(), "value")
 
 
-fn test_integer() raises:
+def test_integer() raises:
     var v = parse_json("42")
     assert_true(v.is_number(), "is_number")
     assert_int_eq(v.as_int(), 42, "as_int")
 
 
-fn test_negative_number() raises:
+def test_negative_number() raises:
     var v = parse_json("-7")
     assert_int_eq(v.as_int(), -7, "as_int")
 
 
-fn test_decimal_number() raises:
+def test_decimal_number() raises:
     var v = parse_json("3.14")
     assert_float_near(v.as_number(), 3.14, 0.001, "as_number")
 
 
-fn test_exponent_number() raises:
+def test_exponent_number() raises:
     var v = parse_json("1e3")
     assert_float_near(v.as_number(), 1000.0, 0.1, "exponent")
 
 
-fn test_string() raises:
+def test_string() raises:
     var v = parse_json('"hello"')
     assert_true(v.is_string(), "is_string")
     assert_str_eq(v.as_string(), "hello", "value")
 
 
-fn test_empty_string() raises:
+def test_empty_string() raises:
     var v = parse_json('""')
     assert_str_eq(v.as_string(), "", "empty string")
 
 
-fn test_string_with_escapes() raises:
+def test_string_with_escapes() raises:
     var v = parse_json('"line1\\nline2\\ttab"')
     assert_str_eq(v.as_string(), "line1\nline2\ttab", "escapes")
 
@@ -114,13 +114,13 @@ fn test_string_with_escapes() raises:
 # ============================================================================
 
 
-fn test_empty_array() raises:
+def test_empty_array() raises:
     var v = parse_json("[]")
     assert_true(v.is_array(), "is_array")
     assert_int_eq(len(v), 0, "len")
 
 
-fn test_number_array() raises:
+def test_number_array() raises:
     var v = parse_json("[1, 2, 3]")
     assert_int_eq(len(v), 3, "len")
     assert_int_eq(v.get(0).as_int(), 1, "arr[0]")
@@ -128,14 +128,14 @@ fn test_number_array() raises:
     assert_int_eq(v.get(2).as_int(), 3, "arr[2]")
 
 
-fn test_empty_object() raises:
+def test_empty_object() raises:
     var v = parse_json("{}")
     assert_true(v.is_object(), "is_object")
     var k = v.keys()
     assert_int_eq(len(k), 0, "keys len")
 
 
-fn test_simple_object() raises:
+def test_simple_object() raises:
     var v = parse_json('{"name": "Alice", "age": 30}')
     assert_str_eq(v.get("name").as_string(), "Alice", "name")
     assert_int_eq(v.get("age").as_int(), 30, "age")
@@ -148,21 +148,21 @@ fn test_simple_object() raises:
 # ============================================================================
 
 
-fn test_nested_objects() raises:
+def test_nested_objects() raises:
     var v = parse_json('{"user": {"first": "Bob", "last": "Smith"}}')
     var user = v.get("user")
     assert_str_eq(user.get("first").as_string(), "Bob", "first")
     assert_str_eq(user.get("last").as_string(), "Smith", "last")
 
 
-fn test_array_of_objects() raises:
+def test_array_of_objects() raises:
     var v = parse_json('[{"id": 1}, {"id": 2}]')
     assert_int_eq(len(v), 2, "len")
     assert_int_eq(v.get(0).get("id").as_int(), 1, "arr[0].id")
     assert_int_eq(v.get(1).get("id").as_int(), 2, "arr[1].id")
 
 
-fn test_object_with_array() raises:
+def test_object_with_array() raises:
     var v = parse_json('{"tags": ["a", "b", "c"]}')
     var tags = v.get("tags")
     assert_int_eq(len(tags), 3, "tags len")
@@ -175,7 +175,7 @@ fn test_object_with_array() raises:
 # ============================================================================
 
 
-fn test_extra_whitespace() raises:
+def test_extra_whitespace() raises:
     var v = parse_json('  {  "x" :  1  ,  "y"  :  2  }  ')
     assert_int_eq(v.get("x").as_int(), 1, "x")
     assert_int_eq(v.get("y").as_int(), 2, "y")
@@ -186,7 +186,7 @@ fn test_extra_whitespace() raises:
 # ============================================================================
 
 
-fn test_empty_input_raises() raises:
+def test_empty_input_raises() raises:
     var raised = False
     try:
         _ = parse_json("")
@@ -195,7 +195,7 @@ fn test_empty_input_raises() raises:
     assert_true(raised, "empty input should raise")
 
 
-fn test_invalid_input_raises() raises:
+def test_invalid_input_raises() raises:
     var raised = False
     try:
         _ = parse_json("xyz")
@@ -204,7 +204,7 @@ fn test_invalid_input_raises() raises:
     assert_true(raised, "invalid input should raise")
 
 
-fn test_unterminated_string_raises() raises:
+def test_unterminated_string_raises() raises:
     var raised = False
     try:
         _ = parse_json('"hello')
@@ -218,32 +218,32 @@ fn test_unterminated_string_raises() raises:
 # ============================================================================
 
 
-fn test_print_null() raises:
+def test_print_null() raises:
     assert_str_eq(String(parse_json("null")), "null", "print null")
 
 
-fn test_print_number() raises:
+def test_print_number() raises:
     assert_str_eq(String(parse_json("42")), "42", "print int")
     var s = String(parse_json("3.14"))
     # Float rendering may vary; just check it contains 3.14
     assert_true(s.find("3.14") >= 0, "print float contains 3.14")
 
 
-fn test_print_string() raises:
+def test_print_string() raises:
     assert_str_eq(String(parse_json('"hello"')), '"hello"', "print string")
 
 
-fn test_print_array() raises:
+def test_print_array() raises:
     assert_str_eq(String(parse_json("[1, 2]")), "[1, 2]", "print array")
 
 
-fn test_print_object() raises:
+def test_print_object() raises:
     var s = String(parse_json('{"a": 1}'))
     assert_true(s.find('"a"') >= 0, "print obj has key a")
     assert_true(s.find("1") >= 0, "print obj has value 1")
 
 
-fn test_subscript_access() raises:
+def test_subscript_access() raises:
     var arr = parse_json("[10, 20, 30]")
     assert_int_eq(arr[0].as_int(), 10, "arr[0]")
     assert_int_eq(arr[2].as_int(), 30, "arr[2]")
@@ -253,7 +253,7 @@ fn test_subscript_access() raises:
     assert_int_eq(obj["y"].as_int(), 9, 'obj["y"]')
 
 
-fn test_contains() raises:
+def test_contains() raises:
     var obj = parse_json('{"name": "Alice", "age": 30}')
     assert_true("name" in obj, "contains name")
     assert_true("age" in obj, "contains age")
@@ -264,7 +264,7 @@ fn test_contains() raises:
     assert_false("x" in arr, "contains on array")
 
 
-fn test_bool_truthiness() raises:
+def test_bool_truthiness() raises:
     # null is falsy
     assert_false(Bool(parse_json("null")), "null is falsy")
     # true/false
@@ -284,7 +284,7 @@ fn test_bool_truthiness() raises:
     assert_false(Bool(parse_json("{}")), "empty object falsy")
 
 
-fn test_len_object() raises:
+def test_len_object() raises:
     var obj = parse_json('{"a": 1, "b": 2, "c": 3}')
     assert_int_eq(len(obj), 3, "object len")
 
@@ -297,7 +297,7 @@ fn test_len_object() raises:
 # ============================================================================
 
 
-fn test_api_response() raises:
+def test_api_response() raises:
     """Simulate parsing a response body like httpbin.org /get."""
     var body = String(
         '{"url": "https://httpbin.org/get", "args": {},'
@@ -316,31 +316,31 @@ fn test_api_response() raises:
 # ============================================================================
 
 
-fn test_leaf_get_string() raises:
+def test_leaf_get_string() raises:
     var v = parse_json('{"name": "Alice", "city": "NYC"}')
     assert_str_eq(v.get_string("name"), "Alice", "get_string name")
     assert_str_eq(v.get_string("city"), "NYC", "get_string city")
 
 
-fn test_leaf_get_int() raises:
+def test_leaf_get_int() raises:
     var v = parse_json('{"age": 30, "score": -5}')
     assert_int_eq(v.get_int("age"), 30, "get_int age")
     assert_int_eq(v.get_int("score"), -5, "get_int score")
 
 
-fn test_leaf_get_number() raises:
+def test_leaf_get_number() raises:
     var v = parse_json('{"pi": 3.14, "count": 42}')
     assert_float_near(v.get_number("pi"), 3.14, 0.001, "get_number pi")
     assert_float_near(v.get_number("count"), 42.0, 0.001, "get_number count")
 
 
-fn test_leaf_get_bool() raises:
+def test_leaf_get_bool() raises:
     var v = parse_json('{"active": true, "deleted": false}')
     assert_true(v.get_bool("active"), "get_bool active")
     assert_false(v.get_bool("deleted"), "get_bool deleted")
 
 
-fn test_leaf_array_accessors() raises:
+def test_leaf_array_accessors() raises:
     var v = parse_json('["hello", 42, true, 3.14]')
     assert_str_eq(v.get_string(0), "hello", "arr get_string")
     assert_int_eq(v.get_int(1), 42, "arr get_int")
@@ -348,13 +348,13 @@ fn test_leaf_array_accessors() raises:
     assert_float_near(v.get_number(3), 3.14, 0.001, "arr get_number")
 
 
-fn test_leaf_get_array_len() raises:
+def test_leaf_get_array_len() raises:
     var v = parse_json('{"tags": ["a", "b", "c"], "empty": []}')
     assert_int_eq(v.get_array_len("tags"), 3, "get_array_len tags")
     assert_int_eq(v.get_array_len("empty"), 0, "get_array_len empty")
 
 
-fn test_leaf_type_mismatch_raises() raises:
+def test_leaf_type_mismatch_raises() raises:
     var v = parse_json('{"name": "Alice", "age": 30}')
     var raised = False
     try:
@@ -371,7 +371,7 @@ fn test_leaf_type_mismatch_raises() raises:
     assert_true(raised, "get_string on number should raise")
 
 
-fn test_leaf_missing_key_raises() raises:
+def test_leaf_missing_key_raises() raises:
     var v = parse_json('{"x": 1}')
     var raised = False
     try:
@@ -386,15 +386,15 @@ fn test_leaf_missing_key_raises() raises:
 # ============================================================================
 
 
-fn main() raises:
+def main() raises:
     var passed = 0
     var failed = 0
 
-    fn run_test(
+    def run_test(
         name: String,
         mut passed: Int,
         mut failed: Int,
-        test_fn: fn () raises -> None,
+        test_fn: def () raises -> None,
     ):
         try:
             test_fn()
