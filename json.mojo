@@ -11,7 +11,7 @@
 #
 # ============================================================================
 
-from memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory.unsafe_pointer import UnsafePointer, alloc
 
 
 # ============================================================================
@@ -130,7 +130,7 @@ def _write_escaped_string[W: Writer](s: String, mut writer: W):
 # ============================================================================
 
 
-struct JsonObject(Copyable, Movable, Sized, Stringable, Writable):
+struct JsonObject(Copyable, Movable, Sized, Writable):
     """JSON object stored as parallel lists of keys and values."""
 
     var _keys: List[String]
@@ -200,7 +200,7 @@ struct JsonObject(Copyable, Movable, Sized, Stringable, Writable):
 
 
 struct JsonValue(
-    Boolable, Copyable, Movable, SizedRaising, Stringable, Writable
+    Boolable, Copyable, Movable, SizedRaising, Writable
 ):
     """A JSON value: null, bool, number, string, array, or object.
 
