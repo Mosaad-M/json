@@ -386,95 +386,84 @@ fn test_leaf_missing_key_raises() raises:
 # ============================================================================
 
 
+def run_test[test_fn: fn () raises -> None](
+    name: String, mut passed: Int, mut failed: Int
+):
+    try:
+        test_fn()
+        print("  PASS:", name)
+        passed += 1
+    except e:
+        print("  FAIL:", name, "-", String(e))
+        failed += 1
+
+
 def main() raises:
     var passed = 0
     var failed = 0
-
-    def run_test(
-        name: String,
-        mut passed: Int,
-        mut failed: Int,
-        test_fn: fn () raises -> None,
-    ):
-        try:
-            test_fn()
-            print("  PASS:", name)
-            passed += 1
-        except e:
-            print("  FAIL:", name, "-", String(e))
-            failed += 1
 
     print("=== JSON Parser Tests ===")
     print()
 
     # Primitives
-    run_test("null", passed, failed, test_null)
-    run_test("true", passed, failed, test_true)
-    run_test("false", passed, failed, test_false)
-    run_test("integer", passed, failed, test_integer)
-    run_test("negative number", passed, failed, test_negative_number)
-    run_test("decimal number", passed, failed, test_decimal_number)
-    run_test("exponent number", passed, failed, test_exponent_number)
-    run_test("string", passed, failed, test_string)
-    run_test("empty string", passed, failed, test_empty_string)
-    run_test("string with escapes", passed, failed, test_string_with_escapes)
+    run_test[test_null]("null", passed, failed)
+    run_test[test_true]("true", passed, failed)
+    run_test[test_false]("false", passed, failed)
+    run_test[test_integer]("integer", passed, failed)
+    run_test[test_negative_number]("negative number", passed, failed)
+    run_test[test_decimal_number]("decimal number", passed, failed)
+    run_test[test_exponent_number]("exponent number", passed, failed)
+    run_test[test_string]("string", passed, failed)
+    run_test[test_empty_string]("empty string", passed, failed)
+    run_test[test_string_with_escapes]("string with escapes", passed, failed)
 
     # Compounds
-    run_test("empty array", passed, failed, test_empty_array)
-    run_test("number array", passed, failed, test_number_array)
-    run_test("empty object", passed, failed, test_empty_object)
-    run_test("simple object", passed, failed, test_simple_object)
+    run_test[test_empty_array]("empty array", passed, failed)
+    run_test[test_number_array]("number array", passed, failed)
+    run_test[test_empty_object]("empty object", passed, failed)
+    run_test[test_simple_object]("simple object", passed, failed)
 
     # Nested
-    run_test("nested objects", passed, failed, test_nested_objects)
-    run_test("array of objects", passed, failed, test_array_of_objects)
-    run_test("object with array", passed, failed, test_object_with_array)
+    run_test[test_nested_objects]("nested objects", passed, failed)
+    run_test[test_array_of_objects]("array of objects", passed, failed)
+    run_test[test_object_with_array]("object with array", passed, failed)
 
     # Whitespace
-    run_test("extra whitespace", passed, failed, test_extra_whitespace)
+    run_test[test_extra_whitespace]("extra whitespace", passed, failed)
 
     # Pythonic API
-    run_test("print null", passed, failed, test_print_null)
-    run_test("print number", passed, failed, test_print_number)
-    run_test("print string", passed, failed, test_print_string)
-    run_test("print array", passed, failed, test_print_array)
-    run_test("print object", passed, failed, test_print_object)
-    run_test("subscript access", passed, failed, test_subscript_access)
-    run_test("contains", passed, failed, test_contains)
-    run_test("bool truthiness", passed, failed, test_bool_truthiness)
-    run_test("len object", passed, failed, test_len_object)
+    run_test[test_print_null]("print null", passed, failed)
+    run_test[test_print_number]("print number", passed, failed)
+    run_test[test_print_string]("print string", passed, failed)
+    run_test[test_print_array]("print array", passed, failed)
+    run_test[test_print_object]("print object", passed, failed)
+    run_test[test_subscript_access]("subscript access", passed, failed)
+    run_test[test_contains]("contains", passed, failed)
+    run_test[test_bool_truthiness]("bool truthiness", passed, failed)
+    run_test[test_len_object]("len object", passed, failed)
 
     # Errors
-    run_test("empty input raises", passed, failed, test_empty_input_raises)
-    run_test("invalid input raises", passed, failed, test_invalid_input_raises)
-    run_test(
-        "unterminated string raises",
-        passed,
-        failed,
-        test_unterminated_string_raises,
+    run_test[test_empty_input_raises]("empty input raises", passed, failed)
+    run_test[test_invalid_input_raises]("invalid input raises", passed, failed)
+    run_test[test_unterminated_string_raises](
+        "unterminated string raises", passed, failed
     )
 
     # API simulation
-    run_test("api response", passed, failed, test_api_response)
+    run_test[test_api_response]("api response", passed, failed)
 
     # Leaf accessors
-    run_test("leaf get_string", passed, failed, test_leaf_get_string)
-    run_test("leaf get_int", passed, failed, test_leaf_get_int)
-    run_test("leaf get_number", passed, failed, test_leaf_get_number)
-    run_test("leaf get_bool", passed, failed, test_leaf_get_bool)
-    run_test("leaf array accessors", passed, failed, test_leaf_array_accessors)
-    run_test("leaf get_array_len", passed, failed, test_leaf_get_array_len)
-    run_test(
-        "leaf type mismatch raises",
-        passed,
-        failed,
-        test_leaf_type_mismatch_raises,
+    run_test[test_leaf_get_string]("leaf get_string", passed, failed)
+    run_test[test_leaf_get_int]("leaf get_int", passed, failed)
+    run_test[test_leaf_get_number]("leaf get_number", passed, failed)
+    run_test[test_leaf_get_bool]("leaf get_bool", passed, failed)
+    run_test[test_leaf_array_accessors]("leaf array accessors", passed, failed)
+    run_test[test_leaf_get_array_len]("leaf get_array_len", passed, failed)
+    run_test[test_leaf_type_mismatch_raises](
+        "leaf type mismatch raises", passed, failed
     )
-    run_test(
-        "leaf missing key raises",
-        passed,
-        failed,
-        test_leaf_missing_key_raises,
+    run_test[test_leaf_missing_key_raises](
+        "leaf missing key raises", passed, failed
     )
 
     print()
