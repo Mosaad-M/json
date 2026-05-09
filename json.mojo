@@ -144,7 +144,7 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         self._keys = copy._keys.copy()
         self._values = copy._values.copy()
 
-    def __init__(out self, *, take: Self):
+    def __init__(out self, *, deinit take: Self):
         self._keys = take._keys^
         self._values = take._values^
 
@@ -243,7 +243,7 @@ struct JsonValue(
         else:
             self._obj_ptr = Optional[UnsafePointer[JsonObject, MutAnyOrigin]](None)
 
-    def __init__(out self, *, take: Self):
+    def __init__(out self, *, deinit take: Self):
         self.kind = take.kind
         self._bool_val = take._bool_val
         self._num_val = take._num_val
