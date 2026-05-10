@@ -74,7 +74,7 @@ def _write_escaped_string[W: Writer](s: String, mut writer: W):
     per-byte chr() calls. For strings with no escape characters (the
     common case), writes the original string directly — zero copy.
     """
-    var total = len(s)
+    var total = s.byte_length()
     if total == 0:
         return
     var s_copy = s
@@ -352,7 +352,7 @@ struct JsonValue(
                 return 0
             return len(self._obj_ptr.unsafe_value()[])
         elif self.kind == JSON_STRING:
-            return len(self._str_val)
+            return self._str_val.byte_length()
         raise Error("JsonValue of kind " + String(self.kind) + " has no len()")
 
     # ------------------------------------------------------------------
@@ -544,7 +544,7 @@ struct JsonValue(
         elif self.kind == JSON_NUMBER:
             return self._num_val != 0.0
         elif self.kind == JSON_STRING:
-            return len(self._str_val) > 0
+            return self._str_val.byte_length() > 0
         elif self.kind == JSON_ARRAY:
             if self._arr_ptr:
                 return len(self._arr_ptr.unsafe_value()[]) > 0
@@ -664,12 +664,12 @@ def parse_json(s: String) raises -> JsonValue:
     Raises:
         Error if the input is not valid JSON.
     """
-    if len(s) == 0:
+    if s.byte_length() == 0:
         raise Error("empty JSON input")
     # Parse directly from the string's memory — no input copy
     var s_copy = String(s)
     var data_ptr = s_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
-    var data_len = len(s)
+    var data_len = s.byte_length()
     var pos: Int = 0
     var result = _parse_value(data_ptr, data_len, pos)
     _skip_whitespace(data_ptr, data_len, pos)
