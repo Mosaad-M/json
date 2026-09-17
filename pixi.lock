@@ -669,6 +669,30 @@ packages:
   size: 13533346
   timestamp: 1775616188373
   python_site_packages_path: lib/python3.14/site-packages
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.14.4-h4c637c5_100_cp314.conda
+  build_number: 100
+  sha256: 27e7d6cbe021f37244b643f06a98e46767255f7c2907108dd3736f042757ddad
+  md5: e1bc5a3015a4bbeb304706dba5a32b7f
+  depends:
+  - __osx >=11.0
+  - bzip2 >=1.0.8,<2.0a0
+  - libexpat >=2.7.5,<3.0a0
+  - libffi >=3.5.2,<3.6.0a0
+  - liblzma >=5.8.2,<6.0a0
+  - libmpdec >=4.0.0,<5.0a0
+  - libsqlite >=3.52.0,<4.0a0
+  - libzlib >=1.3.2,<2.0a0
+  - ncurses >=6.5,<7.0a0
+  - openssl >=3.5.6,<4.0a0
+  - python_abi 3.14.* *_cp314
+  - readline >=8.3,<9.0a0
+  - tk >=8.6.13,<8.7.0a0
+  - tzdata
+  - zstd >=1.5.7,<1.6.0a0
+  license: Python-2.0
+  size: 13533346
+  timestamp: 1775616188373
+  python_site_packages_path: lib/python3.14/site-packages
 - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
   sha256: d6a17ece93bbd5139e02d2bd7dbfa80bee1a4261dced63f65f679121686bf664
   md5: 5b8d21249ff20967101ffa321cab24e8
