@@ -11,7 +11,7 @@
 #
 # ============================================================================
 
-from std.memory.unsafe_pointer import UnsafePointer, alloc
+from std.memory import Pointer, alloc
 
 
 # ============================================================================
@@ -74,20 +74,20 @@ def _write_escaped_string[W: Writer](s: String, mut writer: W):
     per-byte chr() calls. For strings with no escape characters (the
     common case), writes the original string directly — zero copy.
     """
-    var total = len(s)
+    var total = s.byte_length()
     if total == 0:
         return
     var s_copy = s
-    var ptr = s_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
+    var ptr = s_copy.as_c_string_slice().unsafe_ptr().unsafe_bitcast[UInt8]()
     var run_start = 0
     for i in range(total):
-        var c = (ptr + i)[]
+        var c = ptr[unsafe_offset=i]
         if c == _QUOTE or c == _BACKSLASH or c < 0x20:
             # Flush the non-escape run before this escape char
             if i > run_start:
                 var run = List[UInt8](capacity=i - run_start)
                 for j in range(run_start, i):
-                    run.append((ptr + j)[])
+                    run.append(ptr[unsafe_offset=j])
                 writer.write(String(unsafe_from_utf8=run^))
             # Write the escape sequence
             if c == _QUOTE:
@@ -121,7 +121,7 @@ def _write_escaped_string[W: Writer](s: String, mut writer: W):
     elif run_start < total:
         var run = List[UInt8](capacity=total - run_start)
         for j in range(run_start, total):
-            run.append((ptr + j)[])
+            run.append(ptr[unsafe_offset=j])
         writer.write(String(unsafe_from_utf8=run^))
 
 
@@ -140,13 +140,13 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         self._keys = List[String](capacity=capacity)
         self._values = List[JsonValue](capacity=capacity)
 
-    def __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self._keys = copy._keys.copy()
         self._values = copy._values.copy()
 
-    def __moveinit__(out self, deinit take: Self):
-        self._keys = take._keys^
-        self._values = take._values^
+    def __init__(out self, *, deinit move: Self):
+        self._keys = move._keys^
+        self._values = move._values^
 
     def set(mut self, key: String, var value: JsonValue):
         """Set a key-value pair. Overwrites if key exists."""
@@ -191,7 +191,7 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         writer.write("}")
 
     def __str__(self) -> String:
-        return String.write(self)
+        return String(self)
 
 
 # ============================================================================
@@ -204,7 +204,7 @@ struct JsonValue(
 ):
     """A JSON value: null, bool, number, string, array, or object.
 
-    Uses UnsafePointer for recursive types (array, object) to break
+    Uses Pointer for recursive types (array, object) to break
     circular dependency and allow heap allocation.
     """
 
@@ -212,8 +212,8 @@ struct JsonValue(
     var _bool_val: Bool
     var _num_val: Float64
     var _str_val: String
-    var _arr_ptr: UnsafePointer[List[JsonValue], MutAnyOrigin]
-    var _obj_ptr: UnsafePointer[JsonObject, MutAnyOrigin]
+    var _arr_ptr: Optional[Pointer[List[JsonValue], MutUntrackedOrigin]]
+    var _obj_ptr: Optional[Pointer[JsonObject, MutUntrackedOrigin]]
 
     def __init__(out self):
         """Create a null JsonValue."""
@@ -221,41 +221,43 @@ struct JsonValue(
         self._bool_val = False
         self._num_val = 0.0
         self._str_val = String("")
-        self._arr_ptr = UnsafePointer[List[JsonValue], MutAnyOrigin]()
-        self._obj_ptr = UnsafePointer[JsonObject, MutAnyOrigin]()
+        self._arr_ptr = Optional[Pointer[List[JsonValue], MutUntrackedOrigin]](None)
+        self._obj_ptr = Optional[Pointer[JsonObject, MutUntrackedOrigin]](None)
 
-    def __copyinit__(out self, copy: Self):
+    def __init__(out self, *, copy: Self):
         self.kind = copy.kind
         self._bool_val = copy._bool_val
         self._num_val = copy._num_val
         self._str_val = copy._str_val
         # Deep copy heap-allocated data
         if copy._arr_ptr:
-            self._arr_ptr = alloc[List[JsonValue]](1)
-            self._arr_ptr.init_pointee_copy(copy._arr_ptr[])
+            var p = alloc[List[JsonValue]](1)
+            p.unsafe_write(copy=copy._arr_ptr.unsafe_value()[])
+            self._arr_ptr = Optional(p)
         else:
-            self._arr_ptr = UnsafePointer[List[JsonValue], MutAnyOrigin]()
+            self._arr_ptr = Optional[Pointer[List[JsonValue], MutUntrackedOrigin]](None)
         if copy._obj_ptr:
-            self._obj_ptr = alloc[JsonObject](1)
-            self._obj_ptr.init_pointee_copy(copy._obj_ptr[])
+            var p = alloc[JsonObject](1)
+            p.unsafe_write(copy=copy._obj_ptr.unsafe_value()[])
+            self._obj_ptr = Optional(p)
         else:
-            self._obj_ptr = UnsafePointer[JsonObject, MutAnyOrigin]()
+            self._obj_ptr = Optional[Pointer[JsonObject, MutUntrackedOrigin]](None)
 
-    def __moveinit__(out self, deinit take: Self):
-        self.kind = take.kind
-        self._bool_val = take._bool_val
-        self._num_val = take._num_val
-        self._str_val = take._str_val^
-        self._arr_ptr = take._arr_ptr
-        self._obj_ptr = take._obj_ptr
+    def __init__(out self, *, deinit move: Self):
+        self.kind = move.kind
+        self._bool_val = move._bool_val
+        self._num_val = move._num_val
+        self._str_val = move._str_val^
+        self._arr_ptr = move._arr_ptr
+        self._obj_ptr = move._obj_ptr
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         if self._arr_ptr:
-            self._arr_ptr.destroy_pointee()
-            self._arr_ptr.free()
+            self._arr_ptr.unsafe_value().unsafe_deinit_pointee()
+            self._arr_ptr.unsafe_value().unsafe_free()
         if self._obj_ptr:
-            self._obj_ptr.destroy_pointee()
-            self._obj_ptr.free()
+            self._obj_ptr.unsafe_value().unsafe_deinit_pointee()
+            self._obj_ptr.unsafe_value().unsafe_free()
 
     def copy(self) -> Self:
         """Explicit deep copy."""
@@ -265,11 +267,13 @@ struct JsonValue(
         v._num_val = self._num_val
         v._str_val = self._str_val
         if self._arr_ptr:
-            v._arr_ptr = alloc[List[JsonValue]](1)
-            v._arr_ptr.init_pointee_copy(self._arr_ptr[])
+            var p = alloc[List[JsonValue]](1)
+            p.unsafe_write(copy=self._arr_ptr.unsafe_value()[])
+            v._arr_ptr = Optional(p)
         if self._obj_ptr:
-            v._obj_ptr = alloc[JsonObject](1)
-            v._obj_ptr.init_pointee_copy(self._obj_ptr[])
+            var p = alloc[JsonObject](1)
+            p.unsafe_write(copy=self._obj_ptr.unsafe_value()[])
+            v._obj_ptr = Optional(p)
         return v^
 
     # ------------------------------------------------------------------
@@ -332,23 +336,23 @@ struct JsonValue(
             raise Error("JsonValue is not an array")
         if not self._arr_ptr:
             raise Error("array is null")
-        var arr_len = len(self._arr_ptr[])
+        var arr_len = len(self._arr_ptr.unsafe_value()[])
         if index < 0 or index >= arr_len:
             raise Error("array index out of bounds: " + String(index))
-        return self._arr_ptr[][index].copy()
+        return self._arr_ptr.unsafe_value()[][index].copy()
 
     def __len__(self) raises -> Int:
         """Get length. Works for arrays, objects, and strings."""
         if self.kind == JSON_ARRAY:
             if not self._arr_ptr:
                 return 0
-            return len(self._arr_ptr[])
+            return len(self._arr_ptr.unsafe_value()[])
         elif self.kind == JSON_OBJECT:
             if not self._obj_ptr:
                 return 0
-            return len(self._obj_ptr[])
+            return len(self._obj_ptr.unsafe_value()[])
         elif self.kind == JSON_STRING:
-            return len(self._str_val)
+            return self._str_val.byte_length()
         raise Error("JsonValue of kind " + String(self.kind) + " has no len()")
 
     # ------------------------------------------------------------------
@@ -361,7 +365,7 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             raise Error("object is null")
-        return self._obj_ptr[].get(key)
+        return self._obj_ptr.unsafe_value()[].get(key)
 
     def has_key(self, key: String) raises -> Bool:
         """Check if object has key. Raises if not an object."""
@@ -369,7 +373,7 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             return False
-        return self._obj_ptr[].has_key(key)
+        return self._obj_ptr.unsafe_value()[].has_key(key)
 
     def keys(self) raises -> List[String]:
         """Get object keys. Raises if not an object."""
@@ -377,7 +381,7 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             return List[String]()
-        return self._obj_ptr[].keys()
+        return self._obj_ptr.unsafe_value()[].keys()
 
     # ------------------------------------------------------------------
     # Leaf accessors — extract primitives without deep-copying the tree
@@ -389,11 +393,12 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             raise Error("object is null")
-        for i in range(len(self._obj_ptr[]._keys)):
-            if self._obj_ptr[]._keys[i] == key:
-                if self._obj_ptr[]._values[i].kind != JSON_STRING:
+        var obj = self._obj_ptr.unsafe_value()
+        for i in range(len(obj[]._keys)):
+            if obj[]._keys[i] == key:
+                if obj[]._values[i].kind != JSON_STRING:
                     raise Error("value for '" + key + "' is not a string")
-                return self._obj_ptr[]._values[i]._str_val
+                return obj[]._values[i]._str_val
         raise Error("JSON key not found: " + key)
 
     def get_int(self, key: String) raises -> Int:
@@ -402,11 +407,12 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             raise Error("object is null")
-        for i in range(len(self._obj_ptr[]._keys)):
-            if self._obj_ptr[]._keys[i] == key:
-                if self._obj_ptr[]._values[i].kind != JSON_NUMBER:
+        var obj = self._obj_ptr.unsafe_value()
+        for i in range(len(obj[]._keys)):
+            if obj[]._keys[i] == key:
+                if obj[]._values[i].kind != JSON_NUMBER:
                     raise Error("value for '" + key + "' is not a number")
-                return Int(self._obj_ptr[]._values[i]._num_val)
+                return Int(obj[]._values[i]._num_val)
         raise Error("JSON key not found: " + key)
 
     def get_number(self, key: String) raises -> Float64:
@@ -415,11 +421,12 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             raise Error("object is null")
-        for i in range(len(self._obj_ptr[]._keys)):
-            if self._obj_ptr[]._keys[i] == key:
-                if self._obj_ptr[]._values[i].kind != JSON_NUMBER:
+        var obj = self._obj_ptr.unsafe_value()
+        for i in range(len(obj[]._keys)):
+            if obj[]._keys[i] == key:
+                if obj[]._values[i].kind != JSON_NUMBER:
                     raise Error("value for '" + key + "' is not a number")
-                return self._obj_ptr[]._values[i]._num_val
+                return obj[]._values[i]._num_val
         raise Error("JSON key not found: " + key)
 
     def get_bool(self, key: String) raises -> Bool:
@@ -428,11 +435,12 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             raise Error("object is null")
-        for i in range(len(self._obj_ptr[]._keys)):
-            if self._obj_ptr[]._keys[i] == key:
-                if self._obj_ptr[]._values[i].kind != JSON_BOOL:
+        var obj = self._obj_ptr.unsafe_value()
+        for i in range(len(obj[]._keys)):
+            if obj[]._keys[i] == key:
+                if obj[]._values[i].kind != JSON_BOOL:
                     raise Error("value for '" + key + "' is not a bool")
-                return self._obj_ptr[]._values[i]._bool_val
+                return obj[]._values[i]._bool_val
         raise Error("JSON key not found: " + key)
 
     def get_string(self, index: Int) raises -> String:
@@ -441,12 +449,13 @@ struct JsonValue(
             raise Error("JsonValue is not an array")
         if not self._arr_ptr:
             raise Error("array is null")
-        var arr_len = len(self._arr_ptr[])
+        var arr = self._arr_ptr.unsafe_value()
+        var arr_len = len(arr[])
         if index < 0 or index >= arr_len:
             raise Error("array index out of bounds: " + String(index))
-        if self._arr_ptr[][index].kind != JSON_STRING:
+        if arr[][index].kind != JSON_STRING:
             raise Error("value at index " + String(index) + " is not a string")
-        return self._arr_ptr[][index]._str_val
+        return arr[][index]._str_val
 
     def get_int(self, index: Int) raises -> Int:
         """Get integer value by array index without deep copy."""
@@ -454,12 +463,13 @@ struct JsonValue(
             raise Error("JsonValue is not an array")
         if not self._arr_ptr:
             raise Error("array is null")
-        var arr_len = len(self._arr_ptr[])
+        var arr = self._arr_ptr.unsafe_value()
+        var arr_len = len(arr[])
         if index < 0 or index >= arr_len:
             raise Error("array index out of bounds: " + String(index))
-        if self._arr_ptr[][index].kind != JSON_NUMBER:
+        if arr[][index].kind != JSON_NUMBER:
             raise Error("value at index " + String(index) + " is not a number")
-        return Int(self._arr_ptr[][index]._num_val)
+        return Int(arr[][index]._num_val)
 
     def get_number(self, index: Int) raises -> Float64:
         """Get number value by array index without deep copy."""
@@ -467,12 +477,13 @@ struct JsonValue(
             raise Error("JsonValue is not an array")
         if not self._arr_ptr:
             raise Error("array is null")
-        var arr_len = len(self._arr_ptr[])
+        var arr = self._arr_ptr.unsafe_value()
+        var arr_len = len(arr[])
         if index < 0 or index >= arr_len:
             raise Error("array index out of bounds: " + String(index))
-        if self._arr_ptr[][index].kind != JSON_NUMBER:
+        if arr[][index].kind != JSON_NUMBER:
             raise Error("value at index " + String(index) + " is not a number")
-        return self._arr_ptr[][index]._num_val
+        return arr[][index]._num_val
 
     def get_bool(self, index: Int) raises -> Bool:
         """Get boolean value by array index without deep copy."""
@@ -480,12 +491,13 @@ struct JsonValue(
             raise Error("JsonValue is not an array")
         if not self._arr_ptr:
             raise Error("array is null")
-        var arr_len = len(self._arr_ptr[])
+        var arr = self._arr_ptr.unsafe_value()
+        var arr_len = len(arr[])
         if index < 0 or index >= arr_len:
             raise Error("array index out of bounds: " + String(index))
-        if self._arr_ptr[][index].kind != JSON_BOOL:
+        if arr[][index].kind != JSON_BOOL:
             raise Error("value at index " + String(index) + " is not a bool")
-        return self._arr_ptr[][index]._bool_val
+        return arr[][index]._bool_val
 
     def get_array_len(self, key: String) raises -> Int:
         """Get length of a nested array by key without copying it."""
@@ -493,13 +505,14 @@ struct JsonValue(
             raise Error("JsonValue is not an object")
         if not self._obj_ptr:
             raise Error("object is null")
-        for i in range(len(self._obj_ptr[]._keys)):
-            if self._obj_ptr[]._keys[i] == key:
-                if self._obj_ptr[]._values[i].kind != JSON_ARRAY:
+        var obj = self._obj_ptr.unsafe_value()
+        for i in range(len(obj[]._keys)):
+            if obj[]._keys[i] == key:
+                if obj[]._values[i].kind != JSON_ARRAY:
                     raise Error("value for '" + key + "' is not an array")
-                if not self._obj_ptr[]._values[i]._arr_ptr:
+                if not obj[]._values[i]._arr_ptr:
                     return 0
-                return len(self._obj_ptr[]._values[i]._arr_ptr[])
+                return len(obj[]._values[i]._arr_ptr.unsafe_value()[])
         raise Error("JSON key not found: " + key)
 
     # ------------------------------------------------------------------
@@ -520,7 +533,7 @@ struct JsonValue(
             return False
         if not self._obj_ptr:
             return False
-        return self._obj_ptr[].has_key(key)
+        return self._obj_ptr.unsafe_value()[].has_key(key)
 
     def __bool__(self) -> Bool:
         """Truthiness: null→False, bool→value, number→non-zero, string/array/object→non-empty."""
@@ -531,14 +544,14 @@ struct JsonValue(
         elif self.kind == JSON_NUMBER:
             return self._num_val != 0.0
         elif self.kind == JSON_STRING:
-            return len(self._str_val) > 0
+            return self._str_val.byte_length() > 0
         elif self.kind == JSON_ARRAY:
             if self._arr_ptr:
-                return len(self._arr_ptr[]) > 0
+                return len(self._arr_ptr.unsafe_value()[]) > 0
             return False
         elif self.kind == JSON_OBJECT:
             if self._obj_ptr:
-                return len(self._obj_ptr[]) > 0
+                return len(self._obj_ptr.unsafe_value()[]) > 0
             return False
         return False
 
@@ -563,20 +576,21 @@ struct JsonValue(
         elif self.kind == JSON_ARRAY:
             writer.write("[")
             if self._arr_ptr:
-                var arr_len = len(self._arr_ptr[])
+                var arr = self._arr_ptr.unsafe_value()
+                var arr_len = len(arr[])
                 for i in range(arr_len):
                     if i > 0:
                         writer.write(", ")
-                    self._arr_ptr[][i].write_to(writer)
+                    arr[][i].write_to(writer)
             writer.write("]")
         elif self.kind == JSON_OBJECT:
             if self._obj_ptr:
-                self._obj_ptr[].write_to(writer)
+                self._obj_ptr.unsafe_value()[].write_to(writer)
             else:
                 writer.write("{}")
 
     def __str__(self) -> String:
-        return String.write(self)
+        return String(self)
 
 
 # ============================================================================
@@ -617,8 +631,9 @@ def json_array() -> JsonValue:
     """Create an empty array JsonValue."""
     var v = JsonValue()
     v.kind = JSON_ARRAY
-    v._arr_ptr = alloc[List[JsonValue]](1)
-    v._arr_ptr.init_pointee_move(List[JsonValue](capacity=4))
+    var p = alloc[List[JsonValue]](1)
+    p.unsafe_write(List[JsonValue](capacity=4))
+    v._arr_ptr = Optional(p)
     return v^
 
 
@@ -626,8 +641,9 @@ def json_object() -> JsonValue:
     """Create an empty object JsonValue."""
     var v = JsonValue()
     v.kind = JSON_OBJECT
-    v._obj_ptr = alloc[JsonObject](1)
-    v._obj_ptr.init_pointee_move(JsonObject(capacity=4))
+    var p = alloc[JsonObject](1)
+    p.unsafe_write(JsonObject(capacity=4))
+    v._obj_ptr = Optional(p)
     return v^
 
 
@@ -648,12 +664,12 @@ def parse_json(s: String) raises -> JsonValue:
     Raises:
         Error if the input is not valid JSON.
     """
-    if len(s) == 0:
+    if s.byte_length() == 0:
         raise Error("empty JSON input")
     # Parse directly from the string's memory — no input copy
     var s_copy = String(s)
-    var data_ptr = s_copy.as_c_string_slice().unsafe_ptr().bitcast[UInt8]()
-    var data_len = len(s)
+    var data_ptr = s_copy.as_c_string_slice().unsafe_ptr().unsafe_bitcast[UInt8]()
+    var data_len = s.byte_length()
     var pos: Int = 0
     var result = _parse_value(data_ptr, data_len, pos)
     _skip_whitespace(data_ptr, data_len, pos)
@@ -663,11 +679,11 @@ def parse_json(s: String) raises -> JsonValue:
 
 
 def _skip_whitespace(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ):
     """Skip spaces, tabs, newlines, and carriage returns."""
     while pos < data_len:
-        var c = (data_ptr + pos)[]
+        var c = data_ptr[unsafe_offset=pos]
         if c == _SPACE or c == _TAB or c == _LF or c == _CR:
             pos += 1
         else:
@@ -675,14 +691,14 @@ def _skip_whitespace(
 
 
 def _parse_value(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises -> JsonValue:
     """Parse any JSON value starting at pos."""
     _skip_whitespace(data_ptr, data_len, pos)
     if pos >= data_len:
         raise Error("unexpected end of JSON input")
 
-    var c = (data_ptr + pos)[]
+    var c = data_ptr[unsafe_offset=pos]
 
     if c == _QUOTE:
         var s = _parse_string(data_ptr, data_len, pos)
@@ -713,16 +729,16 @@ def _parse_value(
 
 
 def _parse_string(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises -> String:
     """Parse a JSON string (pos should be at the opening quote)."""
-    if (data_ptr + pos)[] != _QUOTE:
+    if data_ptr[unsafe_offset=pos] != _QUOTE:
         raise Error("expected '\"' at position " + String(pos))
     pos += 1  # skip opening quote
 
     var result = List[UInt8](capacity=64)
     while pos < data_len:
-        var c = (data_ptr + pos)[]
+        var c = data_ptr[unsafe_offset=pos]
         if c == _QUOTE:
             pos += 1  # skip closing quote
             return String(unsafe_from_utf8=result^)
@@ -730,7 +746,7 @@ def _parse_string(
             pos += 1  # skip backslash
             if pos >= data_len:
                 raise Error("unterminated escape sequence")
-            var esc = (data_ptr + pos)[]
+            var esc = data_ptr[unsafe_offset=pos]
             if esc == _QUOTE:
                 result.append(_QUOTE)
             elif esc == _BACKSLASH:
@@ -768,54 +784,54 @@ def _parse_string(
 
 
 def _parse_number(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises -> Float64:
     """Parse a JSON number. Uses integer fast path for pure integers."""
     var start = pos
     var is_negative = False
     # Optional minus
-    if pos < data_len and (data_ptr + pos)[] == _MINUS:
+    if pos < data_len and data_ptr[unsafe_offset=pos] == _MINUS:
         is_negative = True
         pos += 1
     # Digits
     if (
         pos >= data_len
-        or (data_ptr + pos)[] < _ZERO
-        or (data_ptr + pos)[] > _NINE
+        or data_ptr[unsafe_offset=pos] < _ZERO
+        or data_ptr[unsafe_offset=pos] > _NINE
     ):
         raise Error("invalid number at position " + String(start))
     while (
         pos < data_len
-        and (data_ptr + pos)[] >= _ZERO
-        and (data_ptr + pos)[] <= _NINE
+        and data_ptr[unsafe_offset=pos] >= _ZERO
+        and data_ptr[unsafe_offset=pos] <= _NINE
     ):
         pos += 1
     # Check if this is a pure integer (no '.', 'e', or 'E' follows)
     var is_float = False
     # Fractional part
-    if pos < data_len and (data_ptr + pos)[] == _DOT:
+    if pos < data_len and data_ptr[unsafe_offset=pos] == _DOT:
         is_float = True
         pos += 1
         while (
             pos < data_len
-            and (data_ptr + pos)[] >= _ZERO
-            and (data_ptr + pos)[] <= _NINE
+            and data_ptr[unsafe_offset=pos] >= _ZERO
+            and data_ptr[unsafe_offset=pos] <= _NINE
         ):
             pos += 1
     # Exponent
     if pos < data_len and (
-        (data_ptr + pos)[] == _LOWER_E or (data_ptr + pos)[] == _UPPER_E
+        data_ptr[unsafe_offset=pos] == _LOWER_E or data_ptr[unsafe_offset=pos] == _UPPER_E
     ):
         is_float = True
         pos += 1
         if pos < data_len and (
-            (data_ptr + pos)[] == _PLUS or (data_ptr + pos)[] == _MINUS
+            data_ptr[unsafe_offset=pos] == _PLUS or data_ptr[unsafe_offset=pos] == _MINUS
         ):
             pos += 1
         while (
             pos < data_len
-            and (data_ptr + pos)[] >= _ZERO
-            and (data_ptr + pos)[] <= _NINE
+            and data_ptr[unsafe_offset=pos] >= _ZERO
+            and data_ptr[unsafe_offset=pos] <= _NINE
         ):
             pos += 1
 
@@ -826,7 +842,7 @@ def _parse_number(
             int_start += 1
         var val: Int = 0
         for i in range(int_start, pos):
-            val = val * 10 + Int((data_ptr + i)[] - _ZERO)
+            val = val * 10 + Int(data_ptr[unsafe_offset=i] - _ZERO)
         if is_negative:
             val = -val
         return Float64(val)
@@ -842,7 +858,7 @@ def _parse_number(
     var past_dot = False
     var fi = digit_start
     while fi < pos:
-        var fc = (data_ptr + fi)[]
+        var fc = data_ptr[unsafe_offset=fi]
         if fc == _DOT:
             past_dot = True
             fi += 1
@@ -860,14 +876,14 @@ def _parse_number(
     # Parse exponent if present
     if fi < pos:
         var exp_negative = False
-        if fi < pos and (data_ptr + fi)[] == _PLUS:
+        if fi < pos and data_ptr[unsafe_offset=fi] == _PLUS:
             fi += 1
-        elif fi < pos and (data_ptr + fi)[] == _MINUS:
+        elif fi < pos and data_ptr[unsafe_offset=fi] == _MINUS:
             exp_negative = True
             fi += 1
         var exp_val: Int = 0
         while fi < pos:
-            exp_val = exp_val * 10 + Int((data_ptr + fi)[] - _ZERO)
+            exp_val = exp_val * 10 + Int(data_ptr[unsafe_offset=fi] - _ZERO)
             fi += 1
         # Apply exponent via repeated multiply/divide
         var exp_mult: Float64 = 1.0
@@ -884,30 +900,30 @@ def _parse_number(
 
 
 def _parse_object(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises -> JsonValue:
     """Parse a JSON object."""
-    if (data_ptr + pos)[] != _LBRACE:
+    if data_ptr[unsafe_offset=pos] != _LBRACE:
         raise Error("expected '{' at position " + String(pos))
     pos += 1  # skip '{'
 
     var obj = json_object()
 
     _skip_whitespace(data_ptr, data_len, pos)
-    if pos < data_len and (data_ptr + pos)[] == _RBRACE:
+    if pos < data_len and data_ptr[unsafe_offset=pos] == _RBRACE:
         pos += 1  # empty object
         return obj^
 
     while True:
         _skip_whitespace(data_ptr, data_len, pos)
         # Parse key
-        if pos >= data_len or (data_ptr + pos)[] != _QUOTE:
+        if pos >= data_len or data_ptr[unsafe_offset=pos] != _QUOTE:
             raise Error("expected string key at position " + String(pos))
         var key = _parse_string(data_ptr, data_len, pos)
 
         # Expect colon
         _skip_whitespace(data_ptr, data_len, pos)
-        if pos >= data_len or (data_ptr + pos)[] != _COLON:
+        if pos >= data_len or data_ptr[unsafe_offset=pos] != _COLON:
             raise Error("expected ':' at position " + String(pos))
         pos += 1  # skip ':'
 
@@ -915,93 +931,93 @@ def _parse_object(
         var value = _parse_value(data_ptr, data_len, pos)
 
         # Store in object
-        obj._obj_ptr[].set(key^, value^)
+        obj._obj_ptr.unsafe_value()[].set(key^, value^)
 
         # Expect comma or closing brace
         _skip_whitespace(data_ptr, data_len, pos)
         if pos >= data_len:
             raise Error("unterminated object")
-        if (data_ptr + pos)[] == _RBRACE:
+        if data_ptr[unsafe_offset=pos] == _RBRACE:
             pos += 1
             return obj^
-        elif (data_ptr + pos)[] == _COMMA:
+        elif data_ptr[unsafe_offset=pos] == _COMMA:
             pos += 1
         else:
             raise Error("expected ',' or '}' at position " + String(pos))
 
 
 def _parse_array(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises -> JsonValue:
     """Parse a JSON array."""
-    if (data_ptr + pos)[] != _LBRACKET:
+    if data_ptr[unsafe_offset=pos] != _LBRACKET:
         raise Error("expected '[' at position " + String(pos))
     pos += 1  # skip '['
 
     var arr = json_array()
 
     _skip_whitespace(data_ptr, data_len, pos)
-    if pos < data_len and (data_ptr + pos)[] == _RBRACKET:
+    if pos < data_len and data_ptr[unsafe_offset=pos] == _RBRACKET:
         pos += 1  # empty array
         return arr^
 
     while True:
         var value = _parse_value(data_ptr, data_len, pos)
-        arr._arr_ptr[].append(value^)
+        arr._arr_ptr.unsafe_value()[].append(value^)
 
         _skip_whitespace(data_ptr, data_len, pos)
         if pos >= data_len:
             raise Error("unterminated array")
-        if (data_ptr + pos)[] == _RBRACKET:
+        if data_ptr[unsafe_offset=pos] == _RBRACKET:
             pos += 1
             return arr^
-        elif (data_ptr + pos)[] == _COMMA:
+        elif data_ptr[unsafe_offset=pos] == _COMMA:
             pos += 1
         else:
             raise Error("expected ',' or ']' at position " + String(pos))
 
 
 def _parse_true(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises:
     """Parse the literal 'true'."""
     if (
         pos + 3 >= data_len
-        or (data_ptr + pos)[] != _LOWER_T
-        or (data_ptr + pos + 1)[] != _LOWER_R
-        or (data_ptr + pos + 2)[] != _LOWER_U
-        or (data_ptr + pos + 3)[] != _LOWER_E
+        or data_ptr[unsafe_offset=pos] != _LOWER_T
+        or data_ptr[unsafe_offset=pos + 1] != _LOWER_R
+        or data_ptr[unsafe_offset=pos + 2] != _LOWER_U
+        or data_ptr[unsafe_offset=pos + 3] != _LOWER_E
     ):
         raise Error("invalid literal at position " + String(pos))
     pos += 4
 
 
 def _parse_false(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises:
     """Parse the literal 'false'."""
     if (
         pos + 4 >= data_len
-        or (data_ptr + pos)[] != _LOWER_F
-        or (data_ptr + pos + 1)[] != _LOWER_A
-        or (data_ptr + pos + 2)[] != _LOWER_L
-        or (data_ptr + pos + 3)[] != _LOWER_S
-        or (data_ptr + pos + 4)[] != _LOWER_E
+        or data_ptr[unsafe_offset=pos] != _LOWER_F
+        or data_ptr[unsafe_offset=pos + 1] != _LOWER_A
+        or data_ptr[unsafe_offset=pos + 2] != _LOWER_L
+        or data_ptr[unsafe_offset=pos + 3] != _LOWER_S
+        or data_ptr[unsafe_offset=pos + 4] != _LOWER_E
     ):
         raise Error("invalid literal at position " + String(pos))
     pos += 5
 
 
 def _parse_null(
-    data_ptr: UnsafePointer[UInt8, _], data_len: Int, mut pos: Int
+    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
 ) raises:
     """Parse the literal 'null'."""
     if (
         pos + 3 >= data_len
-        or (data_ptr + pos)[] != _LOWER_N
-        or (data_ptr + pos + 1)[] != _LOWER_U
-        or (data_ptr + pos + 2)[] != _LOWER_L
-        or (data_ptr + pos + 3)[] != _LOWER_L
+        or data_ptr[unsafe_offset=pos] != _LOWER_N
+        or data_ptr[unsafe_offset=pos + 1] != _LOWER_U
+        or data_ptr[unsafe_offset=pos + 2] != _LOWER_L
+        or data_ptr[unsafe_offset=pos + 3] != _LOWER_L
     ):
         raise Error("invalid literal at position " + String(pos))
     pos += 4
