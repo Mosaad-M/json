@@ -1,12 +1,20 @@
 [workspace]
-channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "json"
+version = "2.0.0"
+description = "Strict RFC 8259 JSON parser and serializer in pure Mojo"
+license = "MIT"
+channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["linux-64", "osx-arm64"]
-version = "0.1.0"
 
 [tasks]
-test-json = "mojo run test_json.mojo"
-format = "mblack json.mojo test_json.mojo"
+test = "mojo run test_json.mojo"
+test-json = { depends-on = ["test"] }  # alias kept for existing CI/scripts
+conformance = "python3 tools/conformance.py"
+fuzz = "python3 tools/fuzz_floats.py"
+fuzz-parser = "python3 tools/fuzz_parser.py"
+bench = "mkdir -p .cache && mojo build -O3 -I . tools/bench.mojo -o .cache/bench && .cache/bench"
+gen-tables = "python3 tools/gen_float_tables.py"
+format = "mojo format json.mojo test_json.mojo tools/conformance.mojo tools/fuzz_floats.mojo tools/fuzz_parser.mojo tools/bench.mojo"
 
 [dependencies]
 mojo = ">=1.0.0"

@@ -7,23 +7,28 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.1
 
-      - name: Run tests
-        run: pixi run test-json
+      - name: Float tables up to date
+        run: python3 tools/gen_float_tables.py --check
 
-  test-macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: pixi run test
 
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.8.1
+      - name: JSONTestSuite conformance
+        run: pixi run conformance
 
-      - name: Run tests
-        run: pixi run test-json
+      - name: Float parse/print fuzz vs CPython
+        run: pixi run fuzz
+
+      - name: Parser differential fuzz vs CPython json
+        run: pixi run fuzz-parser
