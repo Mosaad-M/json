@@ -2,6 +2,7 @@
 # test_json.mojo — Tests for JSON Parser
 # ============================================================================
 
+from std.ffi import external_call
 from std.memory import bitcast
 
 from json import (
@@ -1134,6 +1135,23 @@ def test_build_large_object_seeded_index() raises:
     assert_int_eq(c.get_int("k150"), 150, "copied index works")
 
 
+def _clock_gettime_like_dependents() -> Int:
+    """Declares clock_gettime the way requests 1.1 does (Int, not a
+    pointer). json must not declare it differently: on Linux that is a
+    compile-time symbol clash in every program using both."""
+    var ts = InlineArray[Int64, 2](fill=0)
+    _ = external_call["clock_gettime", Int32](Int32(0), Int(ts.unsafe_ptr()))
+    return Int(ts[0])
+
+
+def test_no_clock_symbol_clash() raises:
+    assert_true(_clock_gettime_like_dependents() > 0, "clock works")
+    var obj = json_object()  # 16+ keys: exercises the seeded index
+    for i in range(20):
+        obj.set("k" + String(i), json_int(i))
+    assert_int_eq(obj.get_int("k17"), 17, "seeded lookup")
+
+
 # ============================================================================
 # Test Runner
 # ============================================================================
@@ -1314,6 +1332,9 @@ def main() raises:
     )
     run_test[test_build_large_object_seeded_index](
         "built object seeded index", passed, failed
+    )
+    run_test[test_no_clock_symbol_clash](
+        "no clock symbol clash", passed, failed
     )
 
     print()

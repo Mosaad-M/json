@@ -23,7 +23,6 @@ from std.bit import count_leading_zeros
 from std.builtin.globals import global_constant
 from std.collections import Dict
 from std.hashlib import Hasher
-from std.time import perf_counter_ns
 from std.math import isinf, isnan
 from std.memory import OwnedPointer, Pointer, bitcast
 from std.memory.alloc import unsafe_alloc
@@ -331,9 +330,11 @@ struct _SeededKey(Copyable, KeyElement, Movable):
         return self.key != other.key
 
 
-def _new_seed(salt: Int) -> UInt64:
-    """Unpredictable per-object seed (timer and salt, mixed)."""
-    var x = UInt64(perf_counter_ns()) ^ (UInt64(salt) * 0x9E3779B97F4A7C15)
+def _new_seed(address: Int) -> UInt64:
+    """Per-object seed from a heap address, which ASLR randomizes per
+    process (no clock or syscall: calling clock_gettime here would clash
+    with programs that declare it with a different signature)."""
+    var x = UInt64(address) * 0x9E3779B97F4A7C15
     x ^= x >> 33
     x *= 0xFF51AFD7ED558CCD
     x ^= x >> 33
@@ -404,11 +405,11 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         self._values.append(value^)
         var n = len(self._keys)
         if n == _INDEX_THRESHOLD:
-            self._seed = _new_seed(n)
-            var index = Dict[_SeededKey, Int]()
+            var boxed = OwnedPointer(Dict[_SeededKey, Int]())
+            self._seed = _new_seed(Int(boxed.unsafe_ptr()))
             for j in range(n):
-                index[_SeededKey(self._seed, self._keys[j])] = j
-            self._index = OwnedPointer(index^)
+                boxed[][_SeededKey(self._seed, self._keys[j])] = j
+            self._index = boxed^
         elif n > _INDEX_THRESHOLD:
             self._index.value()[][_SeededKey(self._seed, key)] = n - 1
 

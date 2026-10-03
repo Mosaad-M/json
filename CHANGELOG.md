@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.1
+
+### Fixed
+- Programs that declare `clock_gettime` with a different signature than Mojo's stdlib
+  (e.g. `requests` 1.1) failed to compile on Linux together with json 3.0.0 ("existing
+  function with conflicting signature"). The per-object hash seed for built objects no
+  longer reads a clock; it comes from a heap address (randomized per process by ASLR).
+  A regression test declares `clock_gettime` that way and runs on Linux CI.
+
 ## 3.0.0
 
 Parsed documents use a flat layout (yyjson-style): one contiguous block of 16-byte

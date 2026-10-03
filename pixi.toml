@@ -1,6 +1,6 @@
 [workspace]
 name = "json"
-version = "3.0.0"
+version = "3.0.1"
 description = "Strict RFC 8259 JSON parser and serializer in pure Mojo"
 license = "MIT"
 channels = ["https://conda.modular.com/max", "conda-forge"]
