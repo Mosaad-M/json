@@ -6,7 +6,8 @@ on:
     branches: [master]
 
 jobs:
-  test:
+  platform:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -32,3 +33,13 @@ jobs:
 
       - name: Parser differential fuzz vs CPython json
         run: pixi run fuzz-parser
+
+  # Branch protection requires a check named "test": this job reports it,
+  # passing only if every platform job passed.
+  test:
+    if: always()
+    needs: platform
+    runs-on: ubuntu-latest
+    steps:
+      - name: All platforms passed
+        run: test "${{ needs.platform.result }}" = "success"
