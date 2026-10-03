@@ -1,5 +1,50 @@
 # Changelog
 
+## 3.0.0
+
+Parsed documents use a flat layout (yyjson-style): one contiguous block of 16-byte
+values plus a string arena. This removes all three limitations listed for 2.0.0.
+
+### Breaking: migrating from 2.x
+- `parse_json` returns a read-only **`JsonDoc`** instead of a `JsonValue`. Read code
+  (`get_string`, `get_int`, `[]`, `len`, `keys`, `in`, `print`, …) keeps working
+  unchanged.
+- `doc[k]` / `doc.get(k)` return a **`JsonRef`** view instead of a deep copy. A view
+  cannot outlive its document; the compiler rejects code that tries.
+- To mutate a parsed document, or to keep a value after the document is gone, call
+  `to_value()` to get a `JsonValue`, e.g. `var v = parse_json(s).to_value(); v.set(...)`.
+- Functions that took a parsed `JsonValue` can take `JsonRef[_]` (or `JsonDoc`) instead.
+- `JsonRef` has `kind()` as a method; `JsonValue.kind` is still a field.
+
+### Added
+- `JsonDoc`, `JsonRef`: iteration with `items()` (array elements) and `entries()`
+  (object members with `.key()` and `.value`); `as_string_slice()` for zero-copy
+  strings; `to_value()`; `JsonDoc.root()`.
+
+### Performance (vs 2.0.0, `pixi run bench` / `pixi run memprobe`, Apple Silicon)
+- Parse: mixed documents 3.9x faster (62.6 -> 15.9 ms), integers 1.3x, floats 1.1-1.3x.
+- Memory used by parsing: `[0,0,…]` 84.9x -> 8.0x the input size, `[{},…]` and
+  `[[],…]` 49.8x -> 7.9x, mixed documents 14.8x -> 3.2x.
+- Serialization: on par or faster (flat containers are written in a tight loop).
+- Lookups on parsed documents return views (no deep copies); `arr[i]` is O(1) for
+  large arrays of containers (offset table), and objects with 16+ keys are
+  binary-searched.
+
+### Security
+- No recursion anywhere: parsing, serialization, `copy()`, `to_value()` and destruction
+  are iterative, for parsed documents and built `JsonValue` trees alike. A 1M-deep
+  built tree no longer crashes (2.0 crashed at ~10k).
+- No hash flooding: parsed objects use a sorted key index (O(n log n) worst case, no
+  hashing); built `JsonValue` objects hash keys with a per-object random seed.
+- Memory per input byte is bounded (see above); `max_depth` is now purely a policy
+  limit.
+
+### Tooling
+- `pixi run fuzz-parser` also checks every accepted document's layout invariants,
+  that the flat document and its `to_value()` tree serialize identically, and re-reads
+  every value through `keys()` / `get(key)` / `get(i)` / `len()` against CPython.
+- `pixi run memprobe`: memory used by parsing relative to input size.
+
 ## 2.0.0
 
 Correctness release. The parser now follows RFC 8259 strictly, so some input that

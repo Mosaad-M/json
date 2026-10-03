@@ -9,7 +9,11 @@ one file, no dependencies, no FFI.
 - **Exact numbers** — integers that fit in Int64 are kept exactly; everything else is
   converted to the *correctly rounded* Float64 (bit-identical to CPython in fuzzing).
 - **Full Unicode** — `\uXXXX` escapes, including surrogate pairs, decode to UTF-8.
-- **Safe on hostile input** — configurable nesting limit instead of a stack overflow.
+- **Flat, compact documents** — a parsed document is one block of 16-byte values plus
+  a string arena: no per-value allocations, cheap to copy or free, and lookups return
+  views instead of copies.
+- **Safe on hostile input** — iterative (no recursion anywhere), bounded memory per input
+  byte, no hash-flooding surface.
 - **Round-trips** — serialized output parses back to the same values, bit for bit.
 
 ## Install
@@ -31,15 +35,21 @@ from json import parse_json, json_object, json_array, json_string, json_int
 def main() raises:
     var doc = parse_json('{"name": "mojo", "version": 1, "tags": ["fast", "safe"]}')
 
-    # Leaf accessors read straight out of the tree (no copies)
     print(doc.get_string("name"))        # mojo
     print(doc.get_int("version"))        # 1
-    print(doc.get_array_len("tags"))     # 2
 
-    # Subscripts return deep copies of subtrees
+    # Lookups return views into the document (no copies)
     var tags = doc["tags"]
     print(tags.get_string(0))            # fast
     print("name" in doc)                 # True
+    for tag in tags.items():
+        print(tag)                       # "fast", then "safe"
+    for member in doc.entries():
+        print(member.key(), member.value)
+
+    # Mutable copy of a parsed document
+    var v = doc.to_value()
+    v.set("version", json_int(2))
 
     # Build documents
     var out = json_object()
@@ -56,27 +66,35 @@ def main() raises:
 
 | | |
 |---|---|
-| `parse_json(s, max_depth=512) raises -> JsonValue` | Parse one JSON document. Raises with a position on any error. |
+| `parse_json(s, max_depth=512) raises -> JsonDoc` | Parse one JSON document. Raises with a position on any error. |
 
-### `JsonValue`
+### Reading: `JsonDoc` and `JsonRef`
 
-| Kind | Methods |
+`JsonDoc` is the parsed, read-only document; its methods act on the root value.
+`JsonRef` is a view of any value inside a document: cheap to copy, and tied to the
+document's lifetime by the compiler (a view cannot outlive its document).
+
+| Kind | Methods (on both `JsonDoc` and `JsonRef`) |
 |---|---|
-| Type checks | `is_null()` `is_bool()` `is_number()` `is_int()` `is_string()` `is_array()` `is_object()` |
-| Scalars | `as_bool()` `as_number() -> Float64` `as_int() -> Int` `as_string()` |
-| Leaf accessors (no copy) | `get_string(k)` `get_int(k)` `get_number(k)` `get_bool(k)` — `k` is a key (`String`) or an index (`Int`); `get_array_len(key)` |
-| Subtrees (deep copy) | `get(k)`, `v[k]` |
-| Objects | `keys()` (insertion order) `has_key(key)` `key in v` `set(key, value)` |
-| Arrays | `append(value)` |
-| Other | `len(v)` (array/object size, string codepoints) · `Bool(v)` (Python-style truthiness) · `String(v)` / `print(v)` (serialize) · `copy()` |
+| Type checks | `kind()` `is_null()` `is_bool()` `is_number()` `is_int()` `is_string()` `is_array()` `is_object()` |
+| Scalars | `as_bool()` `as_number() -> Float64` `as_int() -> Int` `as_string()`; `JsonRef.as_string_slice()` (zero-copy) |
+| Lookups (views) | `get(k)`, `v[k]` — `k` is a key (`String`) or an index (`Int`) |
+| Leaf shortcuts | `get_string(k)` `get_int(k)` `get_number(k)` `get_bool(k)` `get_array_len(key)` |
+| Objects | `keys()` (insertion order) `has_key(key)` `key in v` `entries()` (iterate members: `.key()`, `.value`) |
+| Arrays | `items()` (iterate elements) |
+| Other | `len(v)` (array/object size, string codepoints) · `Bool(v)` (Python-style truthiness) · `String(v)` / `print(v)` (serialize) · `to_value()` (mutable copy) · `JsonDoc.root()` |
+
+### Building: `JsonValue`
+
+A mutable tree for constructing or editing documents. Same read methods as above
+(lookups return deep copies), plus `set(key, value)` on objects, `append(value)` on
+arrays, and `copy()`.
+
+Constructors: `json_null()` `json_bool(b)` `json_int(i)` `json_number(f)`
+`json_string(s)` `json_array()` `json_object()`.
 
 All typed accessors raise if the value has the wrong kind, the key is missing, or the
 index is out of bounds.
-
-### Constructors
-
-`json_null()` `json_bool(b)` `json_int(i)` `json_number(f)` `json_string(s)`
-`json_array()` `json_object()`
 
 ## Semantics
 
@@ -91,11 +109,13 @@ unknown escapes, and raw control characters (U+0000–U+001F) are errors. Input 
 valid UTF-8, which every Mojo `String` is.
 
 **Objects.** Keys keep insertion order. For a duplicate key, the last value wins and
-the key keeps its first position. Lookups use a linear scan up to 16 keys and a hash
-index above that.
+the key keeps its first position. In parsed documents, lookups scan objects of up to 16
+keys and binary-search a sorted key index above that; arrays of containers with 16+
+elements get an offset table, so `arr[i]` is O(1).
 
-**Nesting.** Arrays and objects may nest `max_depth` (default 512) levels deep; deeper
-input raises instead of overflowing the stack.
+**Nesting.** Parsing, serialization, copying, conversion and destruction are all
+iterative, so depth never exhausts the stack. `max_depth` (default 512) is a policy limit
+on parsed input; raise it if you need deeper documents.
 
 **Serialization.** Output uses `", "` and `": "` separators. Numbers are written exactly
 like Python's `json.dumps` / `repr`, so floats keep their float-ness on a round trip:
@@ -111,9 +131,9 @@ Float digits are the shortest that parse back to the same double (closest, ties 
 even). `inf` and `nan` (which only arise from `json_number`) are written as `null`, as
 in JavaScript.
 
-**Performance.** `get()` and `[]` deep-copy the subtree they return. In hot paths,
-use the leaf accessors (`get_string`, `get_int`, …), which copy only the scalar.
-Number conversion uses the standard fast algorithms: Clinger's fast path and
+**Performance.** Parsing writes one contiguous block of 16-byte values and one string
+arena: no allocation per value. On parsed documents `get()`/`[]` return views; on
+`JsonValue` they deep-copy. Number conversion uses the standard fast algorithms: Clinger's fast path and
 **Eisel-Lemire** (as in fast_float, Rust, Go) for parsing, with an exact big-integer
 fallback for the rare undecidable cases, and **Schubfach** (as in Java 19+) for printing.
 `pixi run bench` reports parse/serialize throughput.
@@ -122,28 +142,24 @@ fallback for the rare undecidable cases, and **Schubfach** (as in Java 19+) for 
 
 `parse_json` is designed for untrusted input:
 
-- **No crashes.** Fuzzed with 300k+ mutated documents (with stdlib bounds checks on);
-  every input either parses or raises. Every unchecked pointer read is preceded by a
-  bounds check or grammar validation.
-- **Bounded nesting.** `max_depth` (default 512) prevents stack exhaustion.
-- **Bounded work per byte.** Parsing is linear in the input. Even crafted ~800-digit
-  floats sitting exactly between two doubles (the worst case for exact rounding) parse
-  at ~95 MB/s, as fast as typical input. Objects of any size use a hash index, so many keys or
-  repeated duplicate keys stay linear.
+- **No crashes.** Fuzzed with 1M+ mutated documents (with stdlib bounds checks on),
+  checking every document's internal layout invariants; every input either parses or
+  raises. Every unchecked pointer read is preceded by a bounds check or grammar
+  validation.
+- **No recursion.** Parsing, serialization, copy, conversion and destruction are
+  iterative, for parsed documents and built `JsonValue` trees alike (tested at 1M levels).
+- **Bounded memory.** A parsed document takes 16 bytes per value plus its strings: at
+  most ~8x the input size for the worst case (inputs made only of tiny values like
+  `[0,0,…]` or `[{},{},…]`), ~3x for typical documents.
+- **Bounded work per byte.** Parsing is linear or O(n log n) in the input. Even crafted
+  ~800-digit floats sitting exactly between two doubles parse at ~90 MB/s.
+- **No hash flooding.** Parsed objects use a sorted key index (no hashing). Built
+  `JsonValue` objects hash keys with a per-object random seed.
 - **Safe error messages.** Errors never echo raw control or non-ASCII bytes from the
   input (they are shown as hex), so they are safe to log.
 
-What callers should still do:
-
-- **Cap input size.** The parsed tree takes roughly 50–90x the input size in memory
-  for inputs made of tiny values (`[0,0,0,…]`, `[[],[],…]`); typical documents take far
-  less. Reject oversized payloads before parsing.
-- **Lower `max_depth`** if you don't expect deep documents.
-- **Hash flooding.** Mojo 1.0's `String` hash is not seeded per process, so an attacker
-  who can craft colliding keys could slow lookups in very large objects. No practical
-  attack is known; capping input size bounds the impact.
-- Trees built through the API (`append`/`set`) have no depth limit; copying, printing,
-  or destroying one nested ~10,000 deep can exhaust the stack.
+Callers should still cap input size before parsing, and may lower `max_depth` if they
+don't expect deep documents.
 
 ## Development
 
@@ -153,6 +169,7 @@ pixi run conformance   # JSONTestSuite (clones it into .cache/ on first run)
 pixi run fuzz          # number parse/print differential fuzz against CPython
 pixi run fuzz-parser   # mutated-document differential fuzz against CPython json
 pixi run bench         # parse/serialize throughput
+pixi run memprobe      # memory used by parsing, relative to input size
 pixi run gen-tables    # regenerate the float tables in json.mojo (--check in CI)
 pixi run format        # mojo format
 ```
