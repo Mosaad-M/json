@@ -6,6 +6,7 @@ from std.memory import bitcast
 
 from json import (
     _eisel_lemire,
+    JSON_OBJECT,
     JsonValue,
     parse_json,
     json_null,
@@ -968,6 +969,172 @@ def test_eisel_lemire_extremes() raises:
 
 
 # ============================================================================
+# Flat documents (JsonDoc / JsonRef)
+# ============================================================================
+
+
+def test_doc_iteration() raises:
+    var doc = parse_json(
+        '{"a": [10, "x", null, [1]], "b": {"c": true}, "d": 2.5}'
+    )
+    var names = List[String]()
+    for m in doc.entries():
+        names.append(m.key())
+    assert_int_eq(len(names), 3, "entries count")
+    assert_str_eq(names[0], "a", "first key")
+    assert_str_eq(names[1], "b", "second key")
+    assert_str_eq(names[2], "d", "third key")
+    var parts = String()
+    for v in doc["a"].items():
+        parts += String(v) + ";"
+    assert_str_eq(parts, '10;"x";null;[1];', "items in order")
+    for m in doc.entries():
+        if m.key() == "b":
+            assert_true(m.value.get_bool("c"), "member value view")
+
+
+def test_doc_views_no_copy() raises:
+    var doc = parse_json('{"user": {"name": "Ada", "tags": ["x", "y"]}}')
+    var user = doc["user"]  # a view, not a copy
+    assert_str_eq(user.get_string("name"), "Ada", "nested view")
+    assert_str_eq(String(user["tags"][1]), '"y"', "chained views")
+    assert_str_eq(
+        String(user["name"].as_string_slice()), "Ada", "zero-copy slice"
+    )
+    assert_int_eq(user.kind(), JSON_OBJECT, "kind()")
+
+
+def _big_object_text() -> String:
+    # >= 16 keys (sorted index): shared prefixes, empty key, escapes,
+    # non-ASCII, and a key that sorts last
+    var keys = List[String]()
+    keys.append("")
+    keys.append("a")
+    keys.append("aa")
+    keys.append("ab")
+    keys.append("a\\u0000")
+    keys.append("é")
+    keys.append("\\ud83d\\ude00")
+    keys.append("zz")
+    for i in range(20):
+        keys.append("k" + String(i))
+    var s = String("{")
+    for i in range(len(keys)):
+        if i > 0:
+            s += ", "
+        s += '"' + keys[i] + '": ' + String(i)
+    return s + "}"
+
+
+def test_large_object_lookup_edges() raises:
+    var doc = parse_json(_big_object_text())
+    doc._validate()
+    assert_int_eq(len(doc), 28, "len")
+    assert_int_eq(doc.get_int(""), 0, "empty key")
+    assert_int_eq(doc.get_int("a"), 1, "prefix a")
+    assert_int_eq(doc.get_int("aa"), 2, "prefix aa")
+    assert_int_eq(doc.get_int("ab"), 3, "prefix ab")
+    assert_int_eq(doc.get_int("a\x00"), 4, "embedded NUL key")
+    assert_int_eq(doc.get_int("é"), 5, "non-ASCII key")
+    assert_int_eq(doc.get_int("😀"), 6, "astral key")
+    assert_int_eq(doc.get_int("zz"), 7, "last in sort order")
+    assert_int_eq(doc.get_int("k19"), 27, "k19")
+    assert_false("" + "b" in doc, "missing between keys")
+    assert_false("zzz" in doc, "missing after last")
+    assert_false("A" in doc, "missing before first non-empty")
+    var k = doc.keys()
+    assert_str_eq(k[3], "ab", "keys() keeps document order")
+
+
+def test_duplicate_keys_compaction() raises:
+    # Small object, and large (indexed) object with nested duplicate values
+    var small = parse_json('{"a": 1, "b": [1, {"x": 1}], "a": {"y": [2]}}')
+    small._validate()
+    assert_str_eq(
+        String(small), '{"a": {"y": [2]}, "b": [1, {"x": 1}]}', "small"
+    )
+    var s = String("{")
+    for i in range(20):
+        s += '"k' + String(i) + '": ' + String(i) + ", "
+    s += '"k3": [1, {"deep": [1, 2]}], "k0": {"z": null}, "k3": {"w": [3]}}'
+    var big = parse_json(s)
+    big._validate()
+    assert_int_eq(len(big), 20, "unique count")
+    assert_str_eq(String(big["k3"]), '{"w": [3]}', "last value wins")
+    assert_str_eq(String(big["k0"]), '{"z": null}', "last value wins (k0)")
+    assert_str_eq(big.keys()[0], "k0", "first position kept")
+    assert_int_eq(big.get_int("k19"), 19, "other keys intact")
+
+
+def test_array_random_access() raises:
+    var s = String("[")
+    for i in range(1000):
+        if i > 0:
+            s += ","
+        s += '{"i": ' + String(i) + "}"
+    s += "]"
+    var doc = parse_json(s)
+    doc._validate()
+    assert_true(doc._slots[0].index_start() >= 0, "offset table built")
+    assert_int_eq(doc[0].get_int("i"), 0, "first")
+    assert_int_eq(doc[500].get_int("i"), 500, "middle")
+    assert_int_eq(doc[999].get_int("i"), 999, "last")
+    var raised = False
+    try:
+        _ = doc[1000]
+    except:
+        raised = True
+    assert_true(raised, "out of range raises")
+    var flat = parse_json("[" + String("7,") * 99 + "7]")
+    assert_true(doc._slots[0].index_start() >= 0, "objects: indexed")
+    assert_true(flat._slots[0].index_start() < 0, "scalars: no table needed")
+    assert_int_eq(flat.get_int(99), 7, "flat stride access")
+
+
+def test_parse_very_deep() raises:
+    var depth = 100_000
+    var doc = parse_json(_nested(depth), max_depth=depth)
+    doc._validate()
+    assert_int_eq(String(doc).byte_length(), 2 * depth, "round trip")
+    var tree = doc.to_value()  # iterative conversion
+    assert_int_eq(String(tree).byte_length(), 2 * depth, "tree round trip")
+    var copy = tree.copy()  # iterative copy; both destroyed iteratively
+    assert_true(copy.is_array(), "deep copy")
+
+
+def test_build_very_deep_value() raises:
+    var root = json_array()
+    for _ in range(1_000_000):
+        var outer = json_array()
+        outer.append(root^)
+        root = outer^
+    var copy = root.copy()
+    assert_int_eq(String(copy).byte_length(), 2_000_002, "deep print")
+    # root and copy are destroyed here, iteratively
+
+
+def test_to_value_is_mutable_copy() raises:
+    var doc = parse_json('{"a": [1, 2], "b": "x"}')
+    var v = doc.to_value()
+    v.set("c", json_int(3))
+    assert_str_eq(String(v), '{"a": [1, 2], "b": "x", "c": 3}', "mutated tree")
+    assert_str_eq(String(doc), '{"a": [1, 2], "b": "x"}', "doc unchanged")
+
+
+def test_build_large_object_seeded_index() raises:
+    var obj = json_object()
+    for i in range(200):
+        obj.set("k" + String(i), json_int(i))
+    obj.set("k7", json_int(-7))
+    assert_int_eq(len(obj), 200, "overwrite keeps len")
+    assert_int_eq(obj.get_int("k7"), -7, "overwrite via index")
+    assert_int_eq(obj.get_int("k199"), 199, "lookup via index")
+    assert_false("k200" in obj, "missing key")
+    var c = obj.copy()
+    assert_int_eq(c.get_int("k150"), 150, "copied index works")
+
+
+# ============================================================================
 # Test Runner
 # ============================================================================
 
@@ -1129,6 +1296,25 @@ def main() raises:
         "duplicate keys last wins", passed, failed
     )
     run_test[test_large_object]("large object", passed, failed)
+
+    # Flat documents
+    run_test[test_doc_iteration]("doc iteration", passed, failed)
+    run_test[test_doc_views_no_copy]("doc views (no copy)", passed, failed)
+    run_test[test_large_object_lookup_edges](
+        "large object lookup edges", passed, failed
+    )
+    run_test[test_duplicate_keys_compaction](
+        "duplicate keys compaction", passed, failed
+    )
+    run_test[test_array_random_access]("array random access", passed, failed)
+    run_test[test_parse_very_deep]("parse 100k-deep", passed, failed)
+    run_test[test_build_very_deep_value]("build 1M-deep value", passed, failed)
+    run_test[test_to_value_is_mutable_copy](
+        "to_value mutable copy", passed, failed
+    )
+    run_test[test_build_large_object_seeded_index](
+        "built object seeded index", passed, failed
+    )
 
     print()
     print("Results:", passed, "passed,", failed, "failed")

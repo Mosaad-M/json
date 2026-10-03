@@ -2,15 +2,18 @@
 # json.mojo — JSON Parser and Serializer
 # ============================================================================
 #
-# Strict RFC 8259 recursive descent parser producing a JsonValue tree, plus
-# a serializer (JsonValue is Writable, so print() / String() emit JSON).
+# Strict RFC 8259 parser producing a flat, read-only JsonDoc (one block of
+# 16-byte values plus a string arena; lookups return JsonRef views), and a
+# mutable JsonValue tree for building documents. Both are Writable, so
+# print() / String() emit JSON. Nothing is recursive.
 #
 # Usage:
-#   var val = parse_json('{"key": 42, "tags": ["a", "b"]}')
-#   var n = val.get_int("key")        # leaf accessor, no copy
-#   var tags = val["tags"]            # subscript, returns a deep copy
+#   var doc = parse_json('{"key": 42, "tags": ["a", "b"]}')
+#   var n = doc.get_int("key")        # 42
+#   var tags = doc["tags"]            # JsonRef view, no copy
+#   for t in tags.items(): print(t)
 #
-#   var obj = json_object()
+#   var obj = json_object()           # building / editing: JsonValue
 #   obj.set("name", json_string("mojo"))
 #   print(obj)                        # {"name": "mojo"}
 #
@@ -19,6 +22,8 @@
 from std.bit import count_leading_zeros
 from std.builtin.globals import global_constant
 from std.collections import Dict
+from std.hashlib import Hasher
+from std.time import perf_counter_ns
 from std.math import isinf, isnan
 from std.memory import OwnedPointer, Pointer, bitcast
 from std.memory.alloc import unsafe_alloc
@@ -87,7 +92,7 @@ comptime _FORMFEED = UInt8(12)
 # ============================================================================
 
 
-def _write_escaped_string[W: Writer](s: String, mut writer: W):
+def _write_escaped_string[W: Writer](s: StringSlice, mut writer: W):
     """Escape a string for JSON output (without surrounding quotes).
 
     Runs of bytes that need no escaping are written as slices of the
@@ -307,29 +312,61 @@ def _float_to_int(x: Float64) raises -> Int:
 # ============================================================================
 
 
+@fieldwise_init
+struct _SeededKey(Copyable, KeyElement, Movable):
+    """Dict key whose hash mixes in a per-object random seed, so colliding
+    keys cannot be precomputed (Mojo's String hash is not seeded)."""
+
+    var seed: UInt64
+    var key: String
+
+    def __hash__[H: Hasher](self, mut hasher: H):
+        hasher.update(self.seed)
+        hasher.update(self.key)
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.key == other.key
+
+    def __ne__(self, other: Self) -> Bool:
+        return self.key != other.key
+
+
+def _new_seed(salt: Int) -> UInt64:
+    """Unpredictable per-object seed (timer and salt, mixed)."""
+    var x = UInt64(perf_counter_ns()) ^ (UInt64(salt) * 0x9E3779B97F4A7C15)
+    x ^= x >> 33
+    x *= 0xFF51AFD7ED558CCD
+    x ^= x >> 33
+    return x
+
+
 struct JsonObject(Copyable, Movable, Sized, Writable):
-    """JSON object: keys in insertion order, with a hash index for large
-    objects.
+    """JSON object for building documents: keys in insertion order, with a
+    seeded hash index for large objects.
 
     Keys and values live in parallel lists. Small objects look keys up
     with a linear scan; once an object reaches _INDEX_THRESHOLD keys a
-    key -> position Dict is built and maintained.
+    key -> position Dict (keys hashed with a per-object random seed) is
+    built and maintained.
     """
 
     var _keys: List[String]
     var _values: List[JsonValue]
     # Built once the object reaches _INDEX_THRESHOLD keys; boxed so small
     # objects stay small.
-    var _index: Optional[OwnedPointer[Dict[String, Int]]]
+    var _index: Optional[OwnedPointer[Dict[_SeededKey, Int]]]
+    var _seed: UInt64
 
     def __init__(out self, capacity: Int = 0):
         self._keys = List[String](capacity=capacity)
         self._values = List[JsonValue](capacity=capacity)
         self._index = None
+        self._seed = 0
 
     def __init__(out self, *, copy: Self):
         self._keys = copy._keys.copy()
         self._values = copy._values.copy()
+        self._seed = copy._seed
         if copy._index:
             self._index = OwnedPointer(copy._index.value()[].copy())
         else:
@@ -339,11 +376,12 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         self._keys = move._keys^
         self._values = move._values^
         self._index = move._index^
+        self._seed = move._seed
 
     def _find(self, key: String) -> Int:
         """Return the position of key, or -1 if absent."""
         if self._index:
-            var i = self._index.value()[].get(key)
+            var i = self._index.value()[].get(_SeededKey(self._seed, key))
             if i:
                 return i.value()
             return -1
@@ -358,16 +396,21 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         if i >= 0:
             self._values[i] = value^
             return
+        self._append_new(key, value^)
+
+    def _append_new(mut self, key: String, var value: JsonValue):
+        """Append a key known to be absent, maintaining the index."""
         self._keys.append(key)
         self._values.append(value^)
         var n = len(self._keys)
         if n == _INDEX_THRESHOLD:
-            var index = Dict[String, Int]()
+            self._seed = _new_seed(n)
+            var index = Dict[_SeededKey, Int]()
             for j in range(n):
-                index[self._keys[j]] = j
+                index[_SeededKey(self._seed, self._keys[j])] = j
             self._index = OwnedPointer(index^)
         elif n > _INDEX_THRESHOLD:
-            self._index.value()[][key] = n - 1
+            self._index.value()[][_SeededKey(self._seed, key)] = n - 1
 
     def get(self, key: String) raises -> JsonValue:
         """Get a deep copy of the value for key. Raises if not found."""
@@ -394,7 +437,7 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
             if i > 0:
                 writer.write(", ")
             writer.write('"')
-            _write_escaped_string[W](self._keys[i], writer)
+            _write_escaped_string[W](StringSlice(self._keys[i]), writer)
             writer.write('": ')
             self._values[i].write_to(writer)
         writer.write("}")
@@ -406,6 +449,59 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
 # ============================================================================
 # JsonValue — Tagged Union
 # ============================================================================
+
+comptime _ArrBox = Optional[Pointer[List[JsonValue], MutUntrackedOrigin]]
+comptime _ObjBox = Optional[Pointer[JsonObject, MutUntrackedOrigin]]
+
+
+@fieldwise_init
+struct _CopyTask(Copyable, ImplicitlyCopyable, Movable):
+    """A container whose children still need deep-copying."""
+
+    var src_arr: _ArrBox
+    var src_obj: _ObjBox
+    var dst_arr: _ArrBox
+    var dst_obj: _ObjBox
+
+
+@fieldwise_init
+struct _ValueWriteFrame(Copyable, ImplicitlyCopyable, Movable):
+    """An open container while serializing a JsonValue."""
+
+    var arr: _ArrBox
+    var obj: _ObjBox
+    var next: Int
+
+
+def _write_child[
+    W: Writer
+](child: JsonValue, mut frames: List[_ValueWriteFrame], mut writer: W):
+    """Write a scalar child, or open a container child."""
+    if child._arr_ptr or child._obj_ptr:
+        writer.write("[" if child._arr_ptr else "{")
+        frames.append(_ValueWriteFrame(child._arr_ptr, child._obj_ptr, 0))
+    else:
+        child._write_scalar(writer)
+
+
+def _detach_children(
+    mut arr: _ArrBox, mut obj: _ObjBox, mut work: List[JsonValue]
+):
+    """Move a container's children onto work and free its storage."""
+    if arr:
+        var p = arr.unsafe_value()
+        var children = p.unsafe_take_pointee()
+        p.unsafe_free()
+        arr = None
+        while children:
+            work.append(children.pop())
+    if obj:
+        var p = obj.unsafe_value()
+        var o = p.unsafe_take_pointee()
+        p.unsafe_free()
+        obj = None
+        while o._values:
+            work.append(o._values.pop())
 
 
 struct JsonValue(Boolable, Copyable, Movable, SizedRaising, Writable):
@@ -439,24 +535,71 @@ struct JsonValue(Boolable, Copyable, Movable, SizedRaising, Writable):
         self._obj_ptr = None
 
     def __init__(out self, *, copy: Self):
-        self.kind = copy.kind
-        self._bool_val = copy._bool_val
-        self._is_int = copy._is_int
-        self._num = copy._num
-        self._str_val = copy._str_val
-        # Deep copy heap-allocated data
-        if copy._arr_ptr:
+        """Deep copy, iterative: any depth is safe."""
+        self = copy._shallow_clone()
+        if not (copy._arr_ptr or copy._obj_ptr):
+            return
+        var tasks = List[_CopyTask]()
+        tasks.append(
+            _CopyTask(
+                copy._arr_ptr, copy._obj_ptr, self._arr_ptr, self._obj_ptr
+            )
+        )
+        while tasks:
+            var t = tasks.pop()
+            if t.src_arr:
+                ref src = t.src_arr.unsafe_value()[]
+                ref dst = t.dst_arr.unsafe_value()[]
+                dst.reserve(len(src))
+                for k in range(len(src)):
+                    dst.append(src[k]._shallow_clone())
+                    if src[k]._arr_ptr or src[k]._obj_ptr:
+                        tasks.append(
+                            _CopyTask(
+                                src[k]._arr_ptr,
+                                src[k]._obj_ptr,
+                                dst[k]._arr_ptr,
+                                dst[k]._obj_ptr,
+                            )
+                        )
+            elif t.src_obj:
+                ref src = t.src_obj.unsafe_value()[]
+                ref dst = t.dst_obj.unsafe_value()[]
+                dst._keys = src._keys.copy()
+                dst._seed = src._seed
+                if src._index:
+                    dst._index = OwnedPointer(src._index.value()[].copy())
+                dst._values.reserve(len(src._values))
+                for k in range(len(src._values)):
+                    ref child = src._values[k]
+                    dst._values.append(child._shallow_clone())
+                    if child._arr_ptr or child._obj_ptr:
+                        tasks.append(
+                            _CopyTask(
+                                child._arr_ptr,
+                                child._obj_ptr,
+                                dst._values[k]._arr_ptr,
+                                dst._values[k]._obj_ptr,
+                            )
+                        )
+
+    def _shallow_clone(self) -> Self:
+        """Same scalar data; containers become new, empty containers."""
+        var v = JsonValue()
+        v.kind = self.kind
+        v._bool_val = self._bool_val
+        v._is_int = self._is_int
+        v._num = self._num
+        v._str_val = self._str_val
+        if self._arr_ptr:
             var p = unsafe_alloc[List[JsonValue]](1)
-            p.unsafe_write(copy=copy._arr_ptr.unsafe_value()[])
-            self._arr_ptr = Optional(p)
-        else:
-            self._arr_ptr = None
-        if copy._obj_ptr:
+            p.unsafe_write(List[JsonValue]())
+            v._arr_ptr = Optional(p)
+        if self._obj_ptr:
             var p = unsafe_alloc[JsonObject](1)
-            p.unsafe_write(copy=copy._obj_ptr.unsafe_value()[])
-            self._obj_ptr = Optional(p)
-        else:
-            self._obj_ptr = None
+            p.unsafe_write(JsonObject())
+            v._obj_ptr = Optional(p)
+        return v^
 
     def __init__(out self, *, deinit move: Self):
         self.kind = move.kind
@@ -468,12 +611,16 @@ struct JsonValue(Boolable, Copyable, Movable, SizedRaising, Writable):
         self._obj_ptr = move._obj_ptr
 
     def __deinit__(deinit self):
-        if self._arr_ptr:
-            self._arr_ptr.unsafe_value().unsafe_deinit_pointee()
-            self._arr_ptr.unsafe_value().unsafe_free()
-        if self._obj_ptr:
-            self._obj_ptr.unsafe_value().unsafe_deinit_pointee()
-            self._obj_ptr.unsafe_value().unsafe_free()
+        """Free children iteratively (no recursion, any depth): detach each
+        node's children onto a work list before the node is destroyed."""
+        if not (self._arr_ptr or self._obj_ptr):
+            return
+        var work = List[JsonValue]()
+        _detach_children(self._arr_ptr, self._obj_ptr, work)
+        while work:
+            var v = work.pop()
+            if v._arr_ptr or v._obj_ptr:
+                _detach_children(v._arr_ptr, v._obj_ptr, work)
 
     def copy(self) -> Self:
         """Explicit deep copy."""
@@ -752,14 +899,45 @@ struct JsonValue(Boolable, Copyable, Movable, SizedRaising, Writable):
         return False
 
     def write_to[W: Writer](self, mut writer: W):
-        """Serialize as a JSON string (used by print() and String())."""
+        """Serialize as JSON (used by print() and String()). Iterative: an
+        explicit stack of open containers, so any depth is safe."""
+        if not (self._arr_ptr or self._obj_ptr):
+            self._write_scalar(writer)
+            return
+        var frames = List[_ValueWriteFrame]()
+        writer.write("[" if self._arr_ptr else "{")
+        frames.append(_ValueWriteFrame(self._arr_ptr, self._obj_ptr, 0))
+        while frames:
+            var top = len(frames) - 1
+            var k = frames[top].next
+            var arr = frames[top].arr
+            var obj = frames[top].obj
+            var n = len(arr.unsafe_value()[]) if arr else len(
+                obj.unsafe_value()[]._values
+            )
+            if k == n:
+                writer.write("]" if arr else "}")
+                _ = frames.pop()
+                continue
+            frames[top].next = k + 1
+            if k > 0:
+                writer.write(", ")
+            if obj:
+                writer.write('"')
+                _write_escaped_string[W](
+                    StringSlice(obj.unsafe_value()[]._keys[k]), writer
+                )
+                writer.write('": ')
+            if arr:
+                _write_child(arr.unsafe_value()[][k], frames, writer)
+            else:
+                _write_child(obj.unsafe_value()[]._values[k], frames, writer)
+
+    def _write_scalar[W: Writer](self, mut writer: W):
         if self.kind == JSON_NULL:
             writer.write("null")
         elif self.kind == JSON_BOOL:
-            if self._bool_val:
-                writer.write("true")
-            else:
-                writer.write("false")
+            writer.write("true" if self._bool_val else "false")
         elif self.kind == JSON_NUMBER:
             if self._is_int:
                 writer.write(self._num)
@@ -767,22 +945,12 @@ struct JsonValue(Boolable, Copyable, Movable, SizedRaising, Writable):
                 _write_float(self._float(), writer)
         elif self.kind == JSON_STRING:
             writer.write('"')
-            _write_escaped_string[W](self._str_val, writer)
+            _write_escaped_string[W](StringSlice(self._str_val), writer)
             writer.write('"')
         elif self.kind == JSON_ARRAY:
-            writer.write("[")
-            if self._arr_ptr:
-                var arr = self._arr_ptr.unsafe_value()
-                for i in range(len(arr[])):
-                    if i > 0:
-                        writer.write(", ")
-                    arr[][i].write_to(writer)
-            writer.write("]")
-        elif self.kind == JSON_OBJECT:
-            if self._obj_ptr:
-                self._obj_ptr.unsafe_value()[].write_to(writer)
-            else:
-                writer.write("{}")
+            writer.write("[]")  # array kind without storage
+        else:
+            writer.write("{}")
 
     def __str__(self) -> String:
         return String(self)
@@ -852,38 +1020,1213 @@ def json_object() -> JsonValue:
 
 
 # ============================================================================
-# Recursive Descent Parser
+# Flat document storage (JsonDoc)
+#
+# A parsed document is one List of 16-byte slots in document order, one
+# byte arena holding every decoded string, and one side table of indexes
+# for large containers (yyjson-style). Containers record their span (slots
+# up to the next sibling), so subtrees are skipped in O(1); objects hold
+# key, value, key, value... after their header slot. Nothing is allocated
+# per value and nothing is recursive: copying or freeing a document copies
+# or frees three lists.
+# ============================================================================
+
+comptime _T_NULL: UInt64 = 0
+comptime _T_FALSE: UInt64 = 1
+comptime _T_TRUE: UInt64 = 2
+comptime _T_INT: UInt64 = 3
+comptime _T_FLOAT: UInt64 = 4
+comptime _T_STRING: UInt64 = 5
+comptime _T_ARRAY: UInt64 = 6
+comptime _T_OBJECT: UInt64 = 7
+comptime _F_FLAT: UInt64 = 1 << 4  # container whose children are all scalars
+comptime _MAX_SLOTS = 1 << 32  # spans and index entries are 32-bit
+
+
+@fieldwise_init
+struct _Slot(Copyable, ImplicitlyCopyable, Movable):
+    """One value: tag = type (bits 0-3) | flags (bits 4-7) | length or
+    member count (bits 8+). payload = Int64 bits, Float64 bits, arena
+    offset (strings), or for containers span (low 32 bits) and 1 + start of
+    the container's side index (high 32 bits; 0 = no index)."""
+
+    var tag: UInt64
+    var payload: UInt64
+
+    @always_inline
+    def kind_tag(self) -> UInt64:
+        return self.tag & 0x0F
+
+    @always_inline
+    def count(self) -> Int:
+        return Int(self.tag >> 8)
+
+    @always_inline
+    def is_container(self) -> Bool:
+        return self.kind_tag() >= _T_ARRAY
+
+    @always_inline
+    def extent(self) -> Int:
+        """Slots occupied by this value, including descendants."""
+        if self.is_container():
+            return Int(self.payload & 0xFFFFFFFF)
+        return 1
+
+    @always_inline
+    def index_start(self) -> Int:
+        """Start of this container's side index, or -1 if it has none."""
+        return Int(self.payload >> 32) - 1
+
+
+@always_inline
+def _int_slot(n: Int) -> _Slot:
+    return _Slot(_T_INT, bitcast[DType.uint64](Int64(n)))
+
+
+@always_inline
+def _float_slot(x: Float64) -> _Slot:
+    return _Slot(_T_FLOAT, bitcast[DType.uint64](x))
+
+
+@fieldwise_init
+struct _Frame(Copyable, ImplicitlyCopyable, Movable):
+    """An open container while parsing."""
+
+    var start: Int
+    var count: Int
+    var is_object: Bool
+    var flat: Bool
+
+
+@fieldwise_init
+struct _WriteFrame(Copyable, ImplicitlyCopyable, Movable):
+    """An open container while serializing."""
+
+    var end: Int
+    var is_object: Bool
+    var written: Int
+
+
+struct JsonDoc(Boolable, Copyable, Movable, SizedRaising, Writable):
+    """A parsed JSON document: read-only, flat, and cheap to copy or free.
+
+    Accessors forward to the root value; lookups return JsonRef views that
+    borrow from the document (the compiler keeps the document alive while
+    a view is in use). Call to_value() for a mutable JsonValue tree.
+    """
+
+    var _slots: List[_Slot]
+    var _arena: List[UInt8]
+    var _index: List[UInt32]
+
+    def __init__(out self):
+        self._slots = List[_Slot]()
+        self._arena = List[UInt8]()
+        self._index = List[UInt32]()
+
+    def __init__(out self, *, copy: Self):
+        self._slots = copy._slots.copy()
+        self._arena = copy._arena.copy()
+        self._index = copy._index.copy()
+
+    def __init__(out self, *, deinit move: Self):
+        self._slots = move._slots^
+        self._arena = move._arena^
+        self._index = move._index^
+
+    def root(ref self) -> JsonRef[origin_of(self)]:
+        """A view of the top-level value."""
+        return JsonRef(Pointer(to=self), 0)
+
+    # ------------------------------------------------------------------
+    # Forwarding API (same names as JsonValue)
+    # ------------------------------------------------------------------
+
+    def kind(self) -> Int:
+        return self.root().kind()
+
+    def is_null(self) -> Bool:
+        return self.root().is_null()
+
+    def is_bool(self) -> Bool:
+        return self.root().is_bool()
+
+    def is_number(self) -> Bool:
+        return self.root().is_number()
+
+    def is_int(self) -> Bool:
+        return self.root().is_int()
+
+    def is_string(self) -> Bool:
+        return self.root().is_string()
+
+    def is_array(self) -> Bool:
+        return self.root().is_array()
+
+    def is_object(self) -> Bool:
+        return self.root().is_object()
+
+    def as_bool(self) raises -> Bool:
+        return self.root().as_bool()
+
+    def as_number(self) raises -> Float64:
+        return self.root().as_number()
+
+    def as_int(self) raises -> Int:
+        return self.root().as_int()
+
+    def as_string(self) raises -> String:
+        return self.root().as_string()
+
+    def get(ref self, index: Int) raises -> JsonRef[origin_of(self)]:
+        return self.root().get(index)
+
+    def get(ref self, key: String) raises -> JsonRef[origin_of(self)]:
+        return self.root().get(key)
+
+    def __getitem__(ref self, index: Int) raises -> JsonRef[origin_of(self)]:
+        return self.root().get(index)
+
+    def __getitem__(ref self, key: String) raises -> JsonRef[origin_of(self)]:
+        return self.root().get(key)
+
+    def __len__(self) raises -> Int:
+        return len(self.root())
+
+    def has_key(self, key: String) raises -> Bool:
+        return self.root().has_key(key)
+
+    def keys(self) raises -> List[String]:
+        return self.root().keys()
+
+    def __contains__(self, key: String) -> Bool:
+        return key in self.root()
+
+    def get_string(self, key: String) raises -> String:
+        return self.root().get_string(key)
+
+    def get_int(self, key: String) raises -> Int:
+        return self.root().get_int(key)
+
+    def get_number(self, key: String) raises -> Float64:
+        return self.root().get_number(key)
+
+    def get_bool(self, key: String) raises -> Bool:
+        return self.root().get_bool(key)
+
+    def get_string(self, index: Int) raises -> String:
+        return self.root().get_string(index)
+
+    def get_int(self, index: Int) raises -> Int:
+        return self.root().get_int(index)
+
+    def get_number(self, index: Int) raises -> Float64:
+        return self.root().get_number(index)
+
+    def get_bool(self, index: Int) raises -> Bool:
+        return self.root().get_bool(index)
+
+    def get_array_len(self, key: String) raises -> Int:
+        return self.root().get_array_len(key)
+
+    def items(ref self) raises -> _ArrayIter[origin_of(self)]:
+        return self.root().items()
+
+    def entries(ref self) raises -> _ObjectIter[origin_of(self)]:
+        return self.root().entries()
+
+    def to_value(self) -> JsonValue:
+        return self.root().to_value()
+
+    def __bool__(self) -> Bool:
+        return Bool(self.root())
+
+    def write_to[W: Writer](self, mut writer: W):
+        self._write_range(0, writer)
+
+    def __str__(self) -> String:
+        return String(self)
+
+    # ------------------------------------------------------------------
+    # Slot-level helpers (used by JsonRef)
+    # ------------------------------------------------------------------
+
+    @always_inline
+    def _key_less(self, a: Int, b: Int) -> Bool:
+        """Order key slots by bytes, then by position (stable)."""
+        var c = self._cmp_slot_strings(a, b)
+        if c != 0:
+            return c < 0
+        return a < b
+
+    def _cmp_slot_strings(self, a: Int, b: Int) -> Int:
+        var sa = self._slots[a]
+        var sb = self._slots[b]
+        var p = self._arena.unsafe_ptr()
+        return _cmp_bytes(
+            p, Int(sa.payload), sa.count(), p, Int(sb.payload), sb.count()
+        )
+
+    def _cmp_slot_key(self, slot: Int, key: StringSlice) -> Int:
+        """Compare the string at slot with key (bytes, then length)."""
+        var s = self._slots[slot]
+        return _cmp_bytes(
+            self._arena.unsafe_ptr(),
+            Int(s.payload),
+            s.count(),
+            key.unsafe_ptr(),
+            0,
+            key.byte_length(),
+        )
+
+    def _find_member(self, obj: Int, key: StringSlice) -> Int:
+        """Slot of the value for key in the object at obj, or -1."""
+        var header = self._slots[obj]
+        var n = header.count()
+        var ix = header.index_start()
+        if ix < 0:
+            var p = obj + 1
+            for _ in range(n):
+                if self._cmp_slot_key(p, key) == 0:
+                    return p + 1
+                p += 1 + self._slots[p + 1].extent()
+            return -1
+        # Binary search over the key slots sorted by bytes
+        var lo = 0
+        var hi = n
+        while lo < hi:
+            var mid = (lo + hi) // 2
+            var slot = obj + Int(self._index[ix + mid])
+            var c = self._cmp_slot_key(slot, key)
+            if c == 0:
+                return slot + 1
+            if c < 0:
+                lo = mid + 1
+            else:
+                hi = mid
+        return -1
+
+    def _element(self, arr: Int, i: Int) -> Int:
+        """Slot of element i (in range) of the array at arr."""
+        var header = self._slots[arr]
+        if header.tag & _F_FLAT:
+            return arr + 1 + i
+        var ix = header.index_start()
+        if ix >= 0:
+            return arr + Int(self._index[ix + i])
+        var p = arr + 1
+        for _ in range(i):
+            p += self._slots[p].extent()
+        return p
+
+    def _string_at(self, slot: Int) -> String:
+        var s = self._slots[slot]
+        var out = String(capacity=s.count())
+        var p = self._arena.unsafe_ptr()
+        var off = Int(s.payload)
+        out.write(
+            StringSlice(
+                unsafe_from_utf8=Span(
+                    unsafe_ptr=p.unsafe_offset(off), length=s.count()
+                )
+            )
+        )
+        return out^
+
+    # ------------------------------------------------------------------
+    # Conversion to a mutable JsonValue tree (iterative)
+    # ------------------------------------------------------------------
+
+    def _scalar_value(self, i: Int) -> JsonValue:
+        var s = self._slots[i]
+        var t = s.kind_tag()
+        if t == _T_INT:
+            return json_int(Int(bitcast[DType.int64](s.payload)))
+        if t == _T_FLOAT:
+            return json_number(bitcast[DType.float64](s.payload))
+        if t == _T_STRING:
+            return json_string(self._string_at(i))
+        if t == _T_TRUE or t == _T_FALSE:
+            return json_bool(t == _T_TRUE)
+        return json_null()
+
+    def _to_value(self, start: Int) -> JsonValue:
+        var head = self._slots[start]
+        if not head.is_container():
+            return self._scalar_value(start)
+        var open = List[JsonValue]()  # containers under construction
+        var ends = List[Int]()
+        var keys = List[String]()  # key each one gets in its parent
+        open.append(
+            json_object() if head.kind_tag() == _T_OBJECT else json_array()
+        )
+        ends.append(start + head.extent())
+        keys.append(String())
+        var i = start + 1
+        while True:
+            var top = len(open) - 1
+            if i == ends[top]:
+                var done = open.pop()
+                _ = ends.pop()
+                var key = keys.pop()
+                if not open:
+                    return done^
+                _attach(open[len(open) - 1], key, done^)
+                continue
+            var key = String()
+            if open[top].kind == JSON_OBJECT:
+                key = self._string_at(i)
+                i += 1
+            var s = self._slots[i]
+            if s.is_container():
+                open.append(
+                    json_object() if s.kind_tag() == _T_OBJECT else json_array()
+                )
+                ends.append(i + s.extent())
+                keys.append(key^)
+            else:
+                _attach(open[top], key, self._scalar_value(i))
+            i += 1
+
+    # ------------------------------------------------------------------
+    # Serialization (iterative)
+    # ------------------------------------------------------------------
+
+    def _write_string_slot[W: Writer](self, slot: Int, mut writer: W):
+        var s = self._slots[slot]
+        writer.write('"')
+        _write_escaped_string[W](
+            StringSlice(
+                unsafe_from_utf8=Span(
+                    unsafe_ptr=self._arena.unsafe_ptr().unsafe_offset(
+                        Int(s.payload)
+                    ),
+                    length=s.count(),
+                )
+            ),
+            writer,
+        )
+        writer.write('"')
+
+    def _write_range[W: Writer](self, start: Int, mut writer: W):
+        """Write the value at start (and its subtree) as JSON."""
+        if not self._slots:
+            return
+        var end = start + self._slots[start].extent()
+        var stack = List[_WriteFrame]()
+        var i = start
+        while True:
+            while stack and i == stack[len(stack) - 1].end:
+                writer.write("}" if stack[len(stack) - 1].is_object else "]")
+                _ = stack.pop()
+            if i >= end:
+                break
+            if stack:
+                var top = len(stack) - 1
+                if stack[top].written > 0:
+                    writer.write(", ")
+                stack[top].written += 1
+                if stack[top].is_object:
+                    self._write_string_slot(i, writer)
+                    writer.write(": ")
+                    i += 1
+            var s = self._slots[i]
+            var t = s.kind_tag()
+            if t == _T_ARRAY or t == _T_OBJECT:
+                var is_object = t == _T_OBJECT
+                if s.tag & _F_FLAT:
+                    # Only scalar children: tight loop, no stack frame
+                    self._write_flat(i, is_object, writer)
+                    i += s.extent()
+                    continue
+                writer.write("{" if is_object else "[")
+                stack.append(_WriteFrame(i + s.extent(), is_object, 0))
+            else:
+                self._write_scalar_slot(i, writer)
+            i += 1
+
+    def _write_flat[
+        W: Writer
+    ](self, start: Int, is_object: Bool, mut writer: W):
+        """Write a container whose children are all scalars."""
+        var n = self._slots[start].count()
+        var i = start + 1
+        if is_object:
+            writer.write("{")
+            for k in range(n):
+                if k > 0:
+                    writer.write(", ")
+                self._write_string_slot(i, writer)
+                writer.write(": ")
+                self._write_scalar_slot(i + 1, writer)
+                i += 2
+            writer.write("}")
+        else:
+            writer.write("[")
+            for k in range(n):
+                if k > 0:
+                    writer.write(", ")
+                self._write_scalar_slot(i + k, writer)
+            writer.write("]")
+
+    @always_inline
+    def _write_scalar_slot[W: Writer](self, i: Int, mut writer: W):
+        var s = self._slots[i]
+        var t = s.kind_tag()
+        if t == _T_STRING:
+            self._write_string_slot(i, writer)
+        elif t == _T_INT:
+            writer.write(Int(bitcast[DType.int64](s.payload)))
+        elif t == _T_FLOAT:
+            _write_float(bitcast[DType.float64](s.payload), writer)
+        elif t == _T_TRUE:
+            writer.write("true")
+        elif t == _T_FALSE:
+            writer.write("false")
+        else:
+            writer.write("null")
+
+    # ------------------------------------------------------------------
+    # Parsing (iterative: an explicit stack of open containers)
+    # ------------------------------------------------------------------
+
+    def _parse(mut self, s: String, max_depth: Int) raises:
+        var data_len = s.byte_length()
+        if data_len == 0:
+            raise Error("empty JSON input")
+        var data_ptr = s.unsafe_ptr()  # parse in place: no input copy
+        # Reserve the worst case once so the lists never grow (growth copies
+        # would double peak memory): every value takes >= 2 input bytes
+        # (itself and a separator), and decoded strings never exceed the
+        # input. Pages that are never written are not resident.
+        self._slots.reserve(data_len // 2 + 2)
+        self._arena.reserve(data_len)
+        var stack = List[_Frame]()
+        var scratch = List[Int]()  # key positions, reused per object
+        var pos = 0
+        while True:
+            # ---- one value at pos ----
+            _skip_whitespace(data_ptr, data_len, pos)
+            if pos >= data_len:
+                raise Error("unexpected end of JSON input")
+            var c = data_ptr[unsafe_offset=pos]
+            if c == _LBRACE or c == _LBRACKET:
+                if len(stack) >= max_depth:
+                    raise Error(
+                        "maximum nesting depth "
+                        + String(max_depth)
+                        + " exceeded at position "
+                        + String(pos)
+                    )
+                var is_object = c == _LBRACE
+                if stack:
+                    stack[len(stack) - 1].flat = False
+                stack.append(_Frame(len(self._slots), 0, is_object, True))
+                self._slots.append(_Slot(0, 0))  # header, filled on close
+                pos += 1
+                _skip_whitespace(data_ptr, data_len, pos)
+                var closer = _RBRACE if is_object else _RBRACKET
+                if pos < data_len and data_ptr[unsafe_offset=pos] == closer:
+                    pos += 1
+                    self._close(stack.pop(), scratch)
+                else:
+                    if is_object:
+                        self._parse_key(data_ptr, data_len, pos)
+                    continue  # parse the first element / member value
+            elif c == _QUOTE:
+                self._append_string(data_ptr, data_len, pos)
+            elif c == _LOWER_T:
+                _expect_literal["true"](data_ptr, data_len, pos)
+                self._slots.append(_Slot(_T_TRUE, 0))
+            elif c == _LOWER_F:
+                _expect_literal["false"](data_ptr, data_len, pos)
+                self._slots.append(_Slot(_T_FALSE, 0))
+            elif c == _LOWER_N:
+                _expect_literal["null"](data_ptr, data_len, pos)
+                self._slots.append(_Slot(_T_NULL, 0))
+            elif c == _MINUS or _is_digit(c):
+                self._slots.append(_parse_number(data_ptr, data_len, pos))
+            else:
+                raise Error(
+                    "unexpected "
+                    + _describe_byte(c)
+                    + " at position "
+                    + String(pos)
+                )
+
+            # ---- a value just completed: close containers or continue ----
+            var resume = False
+            while stack:
+                var top = len(stack) - 1
+                stack[top].count += 1
+                var is_object = stack[top].is_object
+                _skip_whitespace(data_ptr, data_len, pos)
+                if pos >= data_len:
+                    raise Error(
+                        "unterminated object" if is_object else "unterminated array"
+                    )
+                var d = data_ptr[unsafe_offset=pos]
+                if d == _COMMA:
+                    pos += 1
+                    if is_object:
+                        _skip_whitespace(data_ptr, data_len, pos)
+                        self._parse_key(data_ptr, data_len, pos)
+                    resume = True
+                    break
+                elif d == (_RBRACE if is_object else _RBRACKET):
+                    pos += 1
+                    self._close(stack.pop(), scratch)
+                elif is_object:
+                    raise Error(
+                        "expected ',' or '}' at position " + String(pos)
+                    )
+                else:
+                    raise Error(
+                        "expected ',' or ']' at position " + String(pos)
+                    )
+            if not resume:
+                break
+        _skip_whitespace(data_ptr, data_len, pos)
+        if pos != data_len:
+            raise Error(
+                "unexpected trailing content at position " + String(pos)
+            )
+
+    def _append_string(
+        mut self, data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
+    ) raises:
+        var offset = len(self._arena)
+        _parse_string(data_ptr, data_len, pos, self._arena)
+        var n = len(self._arena) - offset
+        self._slots.append(_Slot(_T_STRING | (UInt64(n) << 8), UInt64(offset)))
+
+    def _parse_key(
+        mut self, data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
+    ) raises:
+        """Parse `"key" :` (pos at the key, whitespace already skipped)."""
+        if pos >= data_len or data_ptr[unsafe_offset=pos] != _QUOTE:
+            raise Error("expected string key at position " + String(pos))
+        self._append_string(data_ptr, data_len, pos)
+        _skip_whitespace(data_ptr, data_len, pos)
+        if pos >= data_len or data_ptr[unsafe_offset=pos] != _COLON:
+            raise Error("expected ':' at position " + String(pos))
+        pos += 1
+
+    def _close(mut self, frame: _Frame, mut scratch: List[Int]) raises:
+        """Fill in a finished container's header (and side index)."""
+        if len(self._slots) >= _MAX_SLOTS:
+            raise Error("JSON document too large (over 2^32 values)")
+        var start = frame.start
+        var count = frame.count
+        var payload: UInt64
+        var tag: UInt64
+        if frame.is_object:
+            # Key slot positions, in document order
+            scratch.clear()
+            var p = start + 1
+            for _ in range(count):
+                scratch.append(p)
+                p += 1 + self._slots[p + 1].extent()
+            # Large objects are sorted once: the sorted order both reveals
+            # duplicates (adjacent equal keys) and becomes the lookup index.
+            var sorted = List[Int]()
+            var has_dup: Bool
+            if count >= _INDEX_THRESHOLD:
+                sorted = scratch.copy()
+                self._sort_key_positions(sorted)
+                has_dup = self._adjacent_equal(sorted)
+            else:
+                has_dup = self._has_duplicate_small(scratch)
+            if has_dup:
+                count = self._compact_object(start, scratch, sorted^)
+                sorted = List[Int]()
+                if count >= _INDEX_THRESHOLD:
+                    sorted = scratch.copy()
+                    self._sort_key_positions(sorted)
+            payload = UInt64(len(self._slots) - start)
+            if count >= _INDEX_THRESHOLD:
+                payload |= UInt64(len(self._index) + 1) << 32
+                for i in range(count):
+                    self._index.append(UInt32(sorted[i] - start))
+            tag = _T_OBJECT | (_F_FLAT if frame.flat else 0)
+        else:
+            payload = UInt64(len(self._slots) - start)
+            if count >= _INDEX_THRESHOLD and not frame.flat:
+                payload |= UInt64(len(self._index) + 1) << 32
+                var p = start + 1
+                for _ in range(count):
+                    self._index.append(UInt32(p - start))
+                    p += self._slots[p].extent()
+            tag = _T_ARRAY | (_F_FLAT if frame.flat else 0)
+        if len(self._index) >= _MAX_SLOTS:
+            raise Error("JSON document too large (over 2^32 values)")
+        self._slots[start] = _Slot(tag | (UInt64(count) << 8), payload)
+
+    def _has_duplicate_small(self, keys: List[Int]) -> Bool:
+        """Pairwise duplicate check for small objects."""
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                if self._cmp_slot_strings(keys[i], keys[j]) == 0:
+                    return True
+        return False
+
+    def _adjacent_equal(self, sorted: List[Int]) -> Bool:
+        for i in range(1, len(sorted)):
+            if self._cmp_slot_strings(sorted[i - 1], sorted[i]) == 0:
+                return True
+        return False
+
+    def _compact_object(
+        mut self, start: Int, mut keys: List[Int], var sorted: List[Int]
+    ) -> Int:
+        """Remove duplicate keys from the object at start (the last value
+        wins; the key keeps its first position). keys holds the key slot
+        positions in document order and is updated; sorted is the same
+        positions sorted by key (computed here if empty). Returns the new
+        member count. Rare: only for inputs with duplicate keys."""
+        var n = len(keys)
+        if not sorted:
+            sorted = keys.copy()
+            self._sort_key_positions(sorted)
+        # For each first occurrence, the key slot whose value wins
+        var winner = List[Int](length=n, fill=-1)
+        var g = 0
+        while g < n:
+            var h = g
+            while (
+                h + 1 < n
+                and self._cmp_slot_strings(sorted[g], sorted[h + 1]) == 0
+            ):
+                h += 1
+            winner[_position_of(keys, sorted[g])] = sorted[h]
+            g = h + 1
+        var region = List[_Slot]()
+        var new_keys = List[Int]()
+        for o in range(n):
+            if winner[o] < 0:
+                continue
+            new_keys.append(start + 1 + len(region))
+            region.append(self._slots[keys[o]])
+            var value = winner[o] + 1
+            for t in range(self._slots[value].extent()):
+                region.append(self._slots[value + t])
+        while len(self._slots) > start + 1:
+            _ = self._slots.pop()
+        for i in range(len(region)):
+            self._slots.append(region[i])
+        keys = new_keys^
+        return len(keys)
+
+    def _sort_key_positions(self, mut items: List[Int]):
+        """Stable bottom-up merge sort of key slot positions by key bytes:
+        O(n log n) on any input."""
+        var n = len(items)
+        if n < 2:
+            return
+        var buf = List[Int](length=n, fill=0)
+        var width = 1
+        while width < n:
+            var lo = 0
+            while lo < n:
+                var mid = min(lo + width, n)
+                var hi = min(lo + 2 * width, n)
+                var i = lo
+                var j = mid
+                var k = lo
+                while i < mid and j < hi:
+                    if self._key_less(items[j], items[i]):
+                        buf[k] = items[j]
+                        j += 1
+                    else:
+                        buf[k] = items[i]
+                        i += 1
+                    k += 1
+                while i < mid:
+                    buf[k] = items[i]
+                    i += 1
+                    k += 1
+                while j < hi:
+                    buf[k] = items[j]
+                    j += 1
+                    k += 1
+                lo += 2 * width
+            var t = items^
+            items = buf^
+            buf = t^
+            width *= 2
+
+    # ------------------------------------------------------------------
+    # Invariant checker (tests/fuzzing only)
+    # ------------------------------------------------------------------
+
+    def _validate(self) raises:
+        """Check the structural invariants of the slot layout. Raises with
+        a description of the first violation."""
+        if not self._slots:
+            raise Error("empty document")
+        var end = self._slots[0].extent()
+        if end != len(self._slots):
+            raise Error("root extent " + String(end) + " != slot count")
+        for i in range(len(self._slots)):
+            var s = self._slots[i]
+            var t = s.kind_tag()
+            if t > _T_OBJECT:
+                raise Error("bad type tag at slot " + String(i))
+            if t == _T_STRING:
+                if Int(s.payload) + s.count() > len(self._arena):
+                    raise Error("string out of arena at slot " + String(i))
+            if not s.is_container():
+                continue
+            var stop = i + s.extent()
+            if stop > len(self._slots) or s.extent() < 1:
+                raise Error("span out of range at slot " + String(i))
+            var p = i + 1
+            var n = 0
+            while p < stop:
+                if t == _T_OBJECT:
+                    if self._slots[p].kind_tag() != _T_STRING:
+                        raise Error("non-string key at slot " + String(p))
+                    p += 1
+                    if p >= stop:
+                        raise Error("key without value at slot " + String(p))
+                if (s.tag & _F_FLAT) and self._slots[p].is_container():
+                    raise Error(
+                        "flat container holds a container at " + String(p)
+                    )
+                p += self._slots[p].extent()
+                n += 1
+            if p != stop:
+                raise Error("children overrun span at slot " + String(i))
+            if n != s.count():
+                raise Error("count mismatch at slot " + String(i))
+            var ix = s.index_start()
+            if ix >= 0:
+                if ix + n > len(self._index):
+                    raise Error("index out of range at slot " + String(i))
+                for k in range(n):
+                    var rel = Int(self._index[ix + k])
+                    if t == _T_ARRAY and i + rel != self._element_walk(i, k):
+                        raise Error("bad array index at slot " + String(i))
+                    if t == _T_OBJECT and k > 0:
+                        var prev = i + Int(self._index[ix + k - 1])
+                        if self._cmp_slot_strings(prev, i + rel) >= 0:
+                            raise Error("object index unsorted at " + String(i))
+            elif n >= _INDEX_THRESHOLD and (
+                t == _T_OBJECT or not (s.tag & _F_FLAT)
+            ):
+                raise Error("missing index at slot " + String(i))
+            if t == _T_OBJECT:
+                # keys must be unique
+                var q = i + 1
+                var seen = List[Int]()
+                while q < stop:
+                    for k in seen:
+                        if self._cmp_slot_strings(k, q) == 0:
+                            raise Error("duplicate key at slot " + String(q))
+                    seen.append(q)
+                    q += 1 + self._slots[q + 1].extent()
+
+    def _element_walk(self, arr: Int, i: Int) -> Int:
+        var p = arr + 1
+        for _ in range(i):
+            p += self._slots[p].extent()
+        return p
+
+
+def _attach(mut parent: JsonValue, key: String, var child: JsonValue):
+    """Add child to an array, or under a (unique) key to an object."""
+    if parent._obj_ptr:
+        parent._obj_ptr.unsafe_value()[]._append_new(key, child^)
+    else:
+        parent._arr_ptr.unsafe_value()[].append(child^)
+
+
+def _position_of(sorted_positions: List[Int], value: Int) -> Int:
+    """Index of value in an ascending list (binary search; must exist)."""
+    var lo = 0
+    var hi = len(sorted_positions) - 1
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if sorted_positions[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _cmp_bytes(
+    a: Pointer[UInt8, _],
+    a_off: Int,
+    a_len: Int,
+    b: Pointer[UInt8, _],
+    b_off: Int,
+    b_len: Int,
+) -> Int:
+    """Lexicographic byte comparison: -1, 0 or 1."""
+    var n = min(a_len, b_len)
+    for i in range(n):
+        var x = a[unsafe_offset=a_off + i]
+        var y = b[unsafe_offset=b_off + i]
+        if x != y:
+            return -1 if x < y else 1
+    if a_len == b_len:
+        return 0
+    return -1 if a_len < b_len else 1
+
+
+# ============================================================================
+# JsonRef — a view of one value inside a JsonDoc
 # ============================================================================
 
 
-def parse_json(
-    s: String, max_depth: Int = DEFAULT_MAX_DEPTH
-) raises -> JsonValue:
-    """Parse a JSON document into a JsonValue tree (strict RFC 8259).
+@fieldwise_init
+struct JsonRef[origin: ImmOrigin](
+    Boolable, Copyable, ImplicitlyCopyable, Movable, SizedRaising, Writable
+):
+    """A read-only view of a value inside a JsonDoc. Cheap to copy; lookups
+    return further views (no deep copies). Its origin ties it to the
+    document, so it cannot outlive it."""
+
+    var _doc: Pointer[JsonDoc, Self.origin]
+    var _i: Int
+
+    @always_inline
+    def _slot(self) -> _Slot:
+        return self._doc[]._slots[self._i]
+
+    @always_inline
+    def _at(self, i: Int) -> Self:
+        return Self(self._doc, i)
+
+    def kind(self) -> Int:
+        """One of JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING,
+        JSON_ARRAY, JSON_OBJECT."""
+        var t = self._slot().kind_tag()
+        if t == _T_NULL:
+            return JSON_NULL
+        if t == _T_FALSE or t == _T_TRUE:
+            return JSON_BOOL
+        if t == _T_INT or t == _T_FLOAT:
+            return JSON_NUMBER
+        if t == _T_STRING:
+            return JSON_STRING
+        if t == _T_ARRAY:
+            return JSON_ARRAY
+        return JSON_OBJECT
+
+    def is_null(self) -> Bool:
+        return self._slot().kind_tag() == _T_NULL
+
+    def is_bool(self) -> Bool:
+        var t = self._slot().kind_tag()
+        return t == _T_FALSE or t == _T_TRUE
+
+    def is_number(self) -> Bool:
+        var t = self._slot().kind_tag()
+        return t == _T_INT or t == _T_FLOAT
+
+    def is_int(self) -> Bool:
+        """True if this is a number stored as an exact Int."""
+        return self._slot().kind_tag() == _T_INT
+
+    def is_string(self) -> Bool:
+        return self._slot().kind_tag() == _T_STRING
+
+    def is_array(self) -> Bool:
+        return self._slot().kind_tag() == _T_ARRAY
+
+    def is_object(self) -> Bool:
+        return self._slot().kind_tag() == _T_OBJECT
+
+    def as_bool(self) raises -> Bool:
+        var t = self._slot().kind_tag()
+        if t != _T_FALSE and t != _T_TRUE:
+            raise Error("JsonValue is not a bool")
+        return t == _T_TRUE
+
+    def as_number(self) raises -> Float64:
+        var s = self._slot()
+        var t = s.kind_tag()
+        if t == _T_INT:
+            return Float64(Int(bitcast[DType.int64](s.payload)))
+        if t == _T_FLOAT:
+            return bitcast[DType.float64](s.payload)
+        raise Error("JsonValue is not a number")
+
+    def as_int(self) raises -> Int:
+        """Number as Int (floats are truncated). Raises if not a number or
+        outside Int64 range."""
+        var s = self._slot()
+        var t = s.kind_tag()
+        if t == _T_INT:
+            return Int(bitcast[DType.int64](s.payload))
+        if t == _T_FLOAT:
+            return _float_to_int(bitcast[DType.float64](s.payload))
+        raise Error("JsonValue is not a number")
+
+    def as_string(self) raises -> String:
+        """The string value (a copy). See as_string_slice() for zero-copy."""
+        if not self.is_string():
+            raise Error("JsonValue is not a string")
+        return self._doc[]._string_at(self._i)
+
+    def as_string_slice(self) raises -> StringSlice[Self.origin]:
+        """The string value as a view into the document (no copy)."""
+        var s = self._slot()
+        if s.kind_tag() != _T_STRING:
+            raise Error("JsonValue is not a string")
+        var p = self._doc[]._arena.unsafe_ptr().unsafe_offset(Int(s.payload))
+        return StringSlice(
+            unsafe_from_utf8=Span[UInt8, Self.origin](
+                unsafe_ptr=p.unsafe_origin_cast[Self.origin](),
+                length=s.count(),
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Containers
+    # ------------------------------------------------------------------
+
+    def get(self, index: Int) raises -> Self:
+        """Array element (a view). Raises if not an array or out of
+        bounds."""
+        var s = self._slot()
+        if s.kind_tag() != _T_ARRAY:
+            raise Error("JsonValue is not an array")
+        if index < 0 or index >= s.count():
+            raise Error("array index out of bounds: " + String(index))
+        return self._at(self._doc[]._element(self._i, index))
+
+    def get(self, key: String) raises -> Self:
+        """Object member (a view). Raises if not an object or the key is
+        missing."""
+        if self._slot().kind_tag() != _T_OBJECT:
+            raise Error("JsonValue is not an object")
+        var v = self._doc[]._find_member(self._i, key)
+        if v < 0:
+            raise Error("JSON key not found: " + key)
+        return self._at(v)
+
+    def __getitem__(self, index: Int) raises -> Self:
+        return self.get(index)
+
+    def __getitem__(self, key: String) raises -> Self:
+        return self.get(key)
+
+    def __len__(self) raises -> Int:
+        """Length of an array or object, or codepoint count of a string."""
+        var s = self._slot()
+        var t = s.kind_tag()
+        if t == _T_ARRAY or t == _T_OBJECT:
+            return s.count()
+        if t == _T_STRING:
+            return len(self.as_string_slice().codepoints())
+        raise Error(
+            "JsonValue of kind " + String(self.kind()) + " has no len()"
+        )
+
+    def has_key(self, key: String) raises -> Bool:
+        if self._slot().kind_tag() != _T_OBJECT:
+            raise Error("JsonValue is not an object")
+        return self._doc[]._find_member(self._i, key) >= 0
+
+    def keys(self) raises -> List[String]:
+        """Object keys in insertion order (copies)."""
+        var s = self._slot()
+        if s.kind_tag() != _T_OBJECT:
+            raise Error("JsonValue is not an object")
+        var out = List[String](capacity=s.count())
+        var p = self._i + 1
+        for _ in range(s.count()):
+            out.append(self._doc[]._string_at(p))
+            p += 1 + self._doc[]._slots[p + 1].extent()
+        return out^
+
+    def __contains__(self, key: String) -> Bool:
+        if self._slot().kind_tag() != _T_OBJECT:
+            return False
+        return self._doc[]._find_member(self._i, key) >= 0
+
+    def items(self) raises -> _ArrayIter[Self.origin]:
+        """Iterate array elements as views."""
+        var s = self._slot()
+        if s.kind_tag() != _T_ARRAY:
+            raise Error("JsonValue is not an array")
+        return _ArrayIter(self._doc, self._i + 1, s.count())
+
+    def entries(self) raises -> _ObjectIter[Self.origin]:
+        """Iterate object members (key, value) in insertion order."""
+        var s = self._slot()
+        if s.kind_tag() != _T_OBJECT:
+            raise Error("JsonValue is not an object")
+        return _ObjectIter(self._doc, self._i + 1, s.count())
+
+    # ------------------------------------------------------------------
+    # Leaf accessors (kept for 2.x compatibility)
+    # ------------------------------------------------------------------
+
+    def get_string(self, key: String) raises -> String:
+        var v = self.get(key)
+        if not v.is_string():
+            raise Error("value for '" + key + "' is not a string")
+        return v.as_string()
+
+    def get_int(self, key: String) raises -> Int:
+        var v = self.get(key)
+        if not v.is_number():
+            raise Error("value for '" + key + "' is not a number")
+        return v.as_int()
+
+    def get_number(self, key: String) raises -> Float64:
+        var v = self.get(key)
+        if not v.is_number():
+            raise Error("value for '" + key + "' is not a number")
+        return v.as_number()
+
+    def get_bool(self, key: String) raises -> Bool:
+        var v = self.get(key)
+        if not v.is_bool():
+            raise Error("value for '" + key + "' is not a bool")
+        return v.as_bool()
+
+    def get_string(self, index: Int) raises -> String:
+        var v = self.get(index)
+        if not v.is_string():
+            raise Error("value at index " + String(index) + " is not a string")
+        return v.as_string()
+
+    def get_int(self, index: Int) raises -> Int:
+        var v = self.get(index)
+        if not v.is_number():
+            raise Error("value at index " + String(index) + " is not a number")
+        return v.as_int()
+
+    def get_number(self, index: Int) raises -> Float64:
+        var v = self.get(index)
+        if not v.is_number():
+            raise Error("value at index " + String(index) + " is not a number")
+        return v.as_number()
+
+    def get_bool(self, index: Int) raises -> Bool:
+        var v = self.get(index)
+        if not v.is_bool():
+            raise Error("value at index " + String(index) + " is not a bool")
+        return v.as_bool()
+
+    def get_array_len(self, key: String) raises -> Int:
+        var v = self.get(key)
+        if not v.is_array():
+            raise Error("value for '" + key + "' is not an array")
+        return v._slot().count()
+
+    def __bool__(self) -> Bool:
+        """Truthiness: null→False, bool→value, number→non-zero,
+        string/array/object→non-empty."""
+        var s = self._slot()
+        var t = s.kind_tag()
+        if t == _T_TRUE:
+            return True
+        if t == _T_INT:
+            return s.payload != 0
+        if t == _T_FLOAT:
+            return bitcast[DType.float64](s.payload) != 0.0
+        if t >= _T_STRING:
+            return s.count() > 0
+        return False
+
+    def to_value(self) -> JsonValue:
+        """A mutable JsonValue copy of this value (built iteratively)."""
+        return self._doc[]._to_value(self._i)
+
+    def write_to[W: Writer](self, mut writer: W):
+        self._doc[]._write_range(self._i, writer)
+
+    def __str__(self) -> String:
+        return String(self)
+
+
+@fieldwise_init
+struct _ArrayIter[origin: ImmOrigin](
+    Copyable, ImplicitlyCopyable, Iterator, Movable
+):
+    comptime Element = JsonRef[Self.origin]
+    var _doc: Pointer[JsonDoc, Self.origin]
+    var _next: Int  # slot of the next element
+    var _left: Int
+
+    def __iter__(ref self) -> Self:
+        return self
+
+    def __has_next__(self) -> Bool:
+        return self._left > 0
+
+    def __next__(mut self) -> JsonRef[Self.origin]:
+        var r = JsonRef(self._doc, self._next)
+        self._next += self._doc[]._slots[self._next].extent()
+        self._left -= 1
+        return r
+
+
+@fieldwise_init
+struct JsonMember[origin: ImmOrigin](Copyable, ImplicitlyCopyable, Movable):
+    """An object member yielded by entries(): key() and value."""
+
+    var _doc: Pointer[JsonDoc, Self.origin]
+    var _key: Int
+    var value: JsonRef[Self.origin]
+
+    def key(self) -> String:
+        return self._doc[]._string_at(self._key)
+
+
+@fieldwise_init
+struct _ObjectIter[origin: ImmOrigin](
+    Copyable, ImplicitlyCopyable, Iterator, Movable
+):
+    comptime Element = JsonMember[Self.origin]
+    var _doc: Pointer[JsonDoc, Self.origin]
+    var _next: Int  # slot of the next key
+    var _left: Int
+
+    def __iter__(ref self) -> Self:
+        return self
+
+    def __has_next__(self) -> Bool:
+        return self._left > 0
+
+    def __next__(mut self) -> JsonMember[Self.origin]:
+        var k = self._next
+        var m = JsonMember(self._doc, k, JsonRef(self._doc, k + 1))
+        self._next = k + 1 + self._doc[]._slots[k + 1].extent()
+        self._left -= 1
+        return m
+
+
+# ============================================================================
+# Parser helpers
+# ============================================================================
+
+
+def parse_json(s: String, max_depth: Int = DEFAULT_MAX_DEPTH) raises -> JsonDoc:
+    """Parse a JSON document (strict RFC 8259) into a read-only JsonDoc.
 
     Args:
         s: JSON text to parse.
-        max_depth: Maximum nesting of arrays/objects. Deeper input raises
-            instead of exhausting the stack.
+        max_depth: Maximum nesting of arrays/objects (a policy limit; the
+            parser is iterative, so large values are safe).
 
     Returns:
-        The parsed JsonValue.
+        The parsed document. Read it through the JsonDoc accessors (which
+        forward to the root value) or JsonRef views; call to_value() for a
+        mutable JsonValue tree.
 
     Raises:
         Error if the input is not valid JSON, nests deeper than max_depth,
         or contains a number that overflows Float64.
     """
-    var data_len = s.byte_length()
-    if data_len == 0:
-        raise Error("empty JSON input")
-    # Parse directly from the string's bytes — no input copy
-    var data_ptr = s.unsafe_ptr()
-    var pos: Int = 0
-    var result = _parse_value(data_ptr, data_len, pos, 0, max_depth)
-    _skip_whitespace(data_ptr, data_len, pos)
-    if pos != data_len:
-        raise Error("unexpected trailing content at position " + String(pos))
-    return result^
+    var doc = JsonDoc()
+    doc._parse(s, max_depth)
+    return doc^
 
 
 def _is_digit(c: UInt8) -> Bool:
@@ -898,44 +2241,6 @@ def _skip_whitespace(data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int):
             pos += 1
         else:
             return
-
-
-def _parse_value(
-    data_ptr: Pointer[UInt8, _],
-    data_len: Int,
-    mut pos: Int,
-    depth: Int,
-    max_depth: Int,
-) raises -> JsonValue:
-    """Parse any JSON value starting at pos."""
-    _skip_whitespace(data_ptr, data_len, pos)
-    if pos >= data_len:
-        raise Error("unexpected end of JSON input")
-
-    var c = data_ptr[unsafe_offset=pos]
-
-    if c == _QUOTE:
-        var s = _parse_string(data_ptr, data_len, pos)
-        return json_string(s^)
-    elif c == _LBRACE:
-        return _parse_object(data_ptr, data_len, pos, depth + 1, max_depth)
-    elif c == _LBRACKET:
-        return _parse_array(data_ptr, data_len, pos, depth + 1, max_depth)
-    elif c == _LOWER_T:
-        _expect_literal["true"](data_ptr, data_len, pos)
-        return json_bool(True)
-    elif c == _LOWER_F:
-        _expect_literal["false"](data_ptr, data_len, pos)
-        return json_bool(False)
-    elif c == _LOWER_N:
-        _expect_literal["null"](data_ptr, data_len, pos)
-        return json_null()
-    elif c == _MINUS or _is_digit(c):
-        return _parse_number(data_ptr, data_len, pos)
-    else:
-        raise Error(
-            "unexpected " + _describe_byte(c) + " at position " + String(pos)
-        )
 
 
 def _describe_byte(c: UInt8) -> String:
@@ -990,20 +2295,23 @@ def _append_utf8(mut out: List[UInt8], cp: Int):
 
 
 def _parse_string(
-    data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
-) raises -> String:
-    """Parse a JSON string (pos should be at the opening quote)."""
+    data_ptr: Pointer[UInt8, _],
+    data_len: Int,
+    mut pos: Int,
+    mut result: List[UInt8],
+) raises:
+    """Parse a JSON string (pos at the opening quote), appending the
+    decoded UTF-8 bytes to result (a JsonDoc's string arena)."""
     var start = pos
     if data_ptr[unsafe_offset=pos] != _QUOTE:
         raise Error("expected '\"' at position " + String(pos))
     pos += 1  # skip opening quote
 
-    var result = List[UInt8](capacity=64)
     while pos < data_len:
         var c = data_ptr[unsafe_offset=pos]
         if c == _QUOTE:
             pos += 1  # skip closing quote
-            return String(unsafe_from_utf8=result^)
+            return
         elif c < 0x20:
             raise Error(
                 "unescaped control character in string at position "
@@ -1064,7 +2372,7 @@ def _parse_string(
 
 def _parse_number(
     data_ptr: Pointer[UInt8, _], data_len: Int, mut pos: Int
-) raises -> JsonValue:
+) raises -> _Slot:
     """Parse a JSON number per the RFC 8259 grammar:
     -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
 
@@ -1118,9 +2426,9 @@ def _parse_number(
     ):
         if int_digits <= 19 and m <= UInt64(Int.MAX):
             if is_negative and m == 0:
-                return json_number(-0.0)
+                return _float_slot(-0.0)
             var n = Int(m)
-            return json_int(-n if is_negative else n)
+            return _int_slot(-n if is_negative else n)
 
     # Fraction: '.' followed by at least one digit
     if pos < data_len and data_ptr[unsafe_offset=pos] == _DOT:
@@ -1169,7 +2477,7 @@ def _parse_number(
     )
     if isinf(result):
         raise Error("number out of range at position " + String(start))
-    return json_number(-result if is_negative else result)
+    return _float_slot(-result if is_negative else result)
 
 
 # BEGIN GENERATED FLOAT TABLES (tools/gen_float_tables.py; do not edit)
@@ -3056,105 +4364,6 @@ def _digits_to_float(
     if bits >= 0:
         return bitcast[DType.float64](bits)
     return _slow_parse_float(data_ptr, digits_start, end, m, nd, e10)
-
-
-def _parse_object(
-    data_ptr: Pointer[UInt8, _],
-    data_len: Int,
-    mut pos: Int,
-    depth: Int,
-    max_depth: Int,
-) raises -> JsonValue:
-    """Parse a JSON object (pos at '{')."""
-    if depth > max_depth:
-        raise Error(
-            "maximum nesting depth "
-            + String(max_depth)
-            + " exceeded at position "
-            + String(pos)
-        )
-    pos += 1  # skip '{'
-
-    var obj = json_object()
-
-    _skip_whitespace(data_ptr, data_len, pos)
-    if pos < data_len and data_ptr[unsafe_offset=pos] == _RBRACE:
-        pos += 1  # empty object
-        return obj^
-    # Non-empty: reserve a few slots up front (empty objects allocate nothing)
-    obj._obj_ptr.unsafe_value()[]._keys.reserve(4)
-    obj._obj_ptr.unsafe_value()[]._values.reserve(4)
-
-    while True:
-        _skip_whitespace(data_ptr, data_len, pos)
-        # Parse key
-        if pos >= data_len or data_ptr[unsafe_offset=pos] != _QUOTE:
-            raise Error("expected string key at position " + String(pos))
-        var key = _parse_string(data_ptr, data_len, pos)
-
-        # Expect colon
-        _skip_whitespace(data_ptr, data_len, pos)
-        if pos >= data_len or data_ptr[unsafe_offset=pos] != _COLON:
-            raise Error("expected ':' at position " + String(pos))
-        pos += 1  # skip ':'
-
-        # Duplicate keys keep their first position and take the last value
-        var value = _parse_value(data_ptr, data_len, pos, depth, max_depth)
-        obj._obj_ptr.unsafe_value()[].set(key^, value^)
-
-        # Expect comma or closing brace
-        _skip_whitespace(data_ptr, data_len, pos)
-        if pos >= data_len:
-            raise Error("unterminated object")
-        if data_ptr[unsafe_offset=pos] == _RBRACE:
-            pos += 1
-            return obj^
-        elif data_ptr[unsafe_offset=pos] == _COMMA:
-            pos += 1
-        else:
-            raise Error("expected ',' or '}' at position " + String(pos))
-
-
-def _parse_array(
-    data_ptr: Pointer[UInt8, _],
-    data_len: Int,
-    mut pos: Int,
-    depth: Int,
-    max_depth: Int,
-) raises -> JsonValue:
-    """Parse a JSON array (pos at '[')."""
-    if depth > max_depth:
-        raise Error(
-            "maximum nesting depth "
-            + String(max_depth)
-            + " exceeded at position "
-            + String(pos)
-        )
-    pos += 1  # skip '['
-
-    var arr = json_array()
-
-    _skip_whitespace(data_ptr, data_len, pos)
-    if pos < data_len and data_ptr[unsafe_offset=pos] == _RBRACKET:
-        pos += 1  # empty array
-        return arr^
-    # Non-empty: reserve a few slots up front (empty arrays allocate nothing)
-    arr._arr_ptr.unsafe_value()[].reserve(4)
-
-    while True:
-        var value = _parse_value(data_ptr, data_len, pos, depth, max_depth)
-        arr._arr_ptr.unsafe_value()[].append(value^)
-
-        _skip_whitespace(data_ptr, data_len, pos)
-        if pos >= data_len:
-            raise Error("unterminated array")
-        if data_ptr[unsafe_offset=pos] == _RBRACKET:
-            pos += 1
-            return arr^
-        elif data_ptr[unsafe_offset=pos] == _COMMA:
-            pos += 1
-        else:
-            raise Error("expected ',' or ']' at position " + String(pos))
 
 
 def _expect_literal[

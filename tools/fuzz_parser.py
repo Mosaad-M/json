@@ -8,7 +8,10 @@ checks, for every input, that json.mojo:
     strict: NaN/Infinity literals, lone surrogates, and numbers that
     overflow Float64 count as invalid;
   * produces the same value (numbers compared as Float64 unless both
-    sides are exact Int64 integers).
+    sides are exact Int64 integers), both when serialized and when
+    re-read through keys()/get(key)/get(i)/len();
+  * passes JsonDoc's layout invariant checks, and matches its JsonValue
+    tree (checked by the Mojo harness, which then exits non-zero).
 
 Usage: python3 tools/fuzz_parser.py [count] [seed] [--binary PATH]
 --binary runs a prebuilt harness (e.g. an AddressSanitizer build) instead
@@ -37,6 +40,9 @@ SEEDS = [
     '{"":{"":{"":[{"":""}]}}}',
     '1.7976931348623157e308',
     '5e-324',
+    # Large containers: array offset tables and nested sorted key indexes
+    '[' + ', '.join('{"i": %d, "v": [%d, {"x": null}]}' % (i, i) for i in range(20)) + ']',
+    '{' + ', '.join('"k%d": {%s}' % (i, ', '.join('"n%d": %d' % (j, j) for j in range(17))) for i in range(17)) + '}',
 ]
 TOKENS = list('{}[]",:\\0123456789eE.-+ tfnlrsu\t\n') + [
     "\\u", "\\ud800", "\\udc00", "true", "null", "1e999", "é", " ", "😀",
@@ -209,8 +215,12 @@ def main():
             problem = f"rejected valid JSON ({line[1:]})"
         elif expected[0] == "invalid" and accepted:
             problem = "accepted invalid JSON"
-        elif accepted and not same(json.loads(line[1:]), expected[1]):
-            problem = f"value mismatch: got {line[1:200]}"
+        elif accepted:
+            serialized, accessed = line[1:].split("\t")
+            if not same(json.loads(serialized), expected[1]):
+                problem = f"value mismatch: got {serialized[:200]}"
+            elif not same(json.loads(accessed), expected[1]):
+                problem = f"accessor (keys/get/len) mismatch: got {accessed[:200]}"
         if problem:
             failures += 1
             if failures <= 10:
