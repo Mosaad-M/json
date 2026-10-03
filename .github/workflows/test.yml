@@ -6,24 +6,40 @@ on:
     branches: [master]
 
 jobs:
+  platform:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+
+      - name: Float tables up to date
+        run: python3 tools/gen_float_tables.py --check
+
+      - name: Unit tests
+        run: pixi run test
+
+      - name: JSONTestSuite conformance
+        run: pixi run conformance
+
+      - name: Float parse/print fuzz vs CPython
+        run: pixi run fuzz
+
+      - name: Parser differential fuzz vs CPython json
+        run: pixi run fuzz-parser
+
+  # Branch protection requires a check named "test": this job reports it,
+  # passing only if every platform job passed.
   test:
-    runs-on: ubuntu-22.04
+    if: always()
+    needs: platform
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.8.1
-
-      - name: Run tests
-        run: pixi run test-json
-
-  test-macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.8.1
-
-      - name: Run tests
-        run: pixi run test-json
+      - name: All platforms passed
+        run: test "${{ needs.platform.result }}" = "success"
