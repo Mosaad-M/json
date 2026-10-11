@@ -9,7 +9,11 @@ from json import parse_json
 
 
 def _repeat(item: String, n: Int) -> String:
-    var s = String(capacity=item.byte_length() * n + 2)
+    var s = String()
+    # Exact size, so the input text adds no slack to peak RSS. reserve() is
+    # deprecated in Mojo 1.1 (reserve_bytes, absent in 1.0); switch to
+    # String(capacity_bytes=) once 1.0 support is dropped.
+    s.reserve(item.byte_length() * n + 2)
     s += "["
     for i in range(n):
         if i > 0:

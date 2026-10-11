@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.0.2
+
+### Fixed
+- Builds on Mojo 1.1.0 (it failed to compile there), and still on 1.0.0. Mojo 1.1
+  renamed `InlineArray` to `Array` (already available in 1.0), changed `Hasher.update`
+  to take bytes, and renamed `String(capacity=)`; json now uses forms both versions
+  accept. No behavior change.
+
+### Added
+- CI job that runs the tests on the newest Mojo release, on every push and weekly.
+
 ## 3.0.1
 
 ### Fixed
