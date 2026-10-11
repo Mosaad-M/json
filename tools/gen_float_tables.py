@@ -79,13 +79,13 @@ def render() -> str:
     lines = [
         BEGIN + " (tools/gen_float_tables.py; do not edit)",
         "# fmt: off",
-        f"comptime _POW5_128: InlineArray[UInt64, {2 * (POW5_MAX_Q - POW5_MIN_Q + 1)}] = [",
+        f"comptime _POW5_128: Array[UInt64, {2 * (POW5_MAX_Q - POW5_MIN_Q + 1)}] = [",
     ]
     for q in range(POW5_MIN_Q, POW5_MAX_Q + 1):
         v = pow5_128(q)
         lines.append(f"    {hex64(v >> 64)}, {hex64(v & MASK64)},  # 5^{q}")
     lines.append("]")
-    lines.append(f"comptime _SCHUBFACH_G: InlineArray[UInt64, {2 * (G_MAX_K - G_MIN_K + 1)}] = [")
+    lines.append(f"comptime _SCHUBFACH_G: Array[UInt64, {2 * (G_MAX_K - G_MIN_K + 1)}] = [")
     for k in range(G_MIN_K, G_MAX_K + 1):
         g = schubfach_g(k)
         lines.append(f"    {hex64(g >> 63)}, {hex64(g & MASK63)},  # k = {k}")
