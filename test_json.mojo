@@ -1139,7 +1139,7 @@ def _clock_gettime_like_dependents() -> Int:
     """Declares clock_gettime the way requests 1.1 does (Int, not a
     pointer). json must not declare it differently: on Linux that is a
     compile-time symbol clash in every program using both."""
-    var ts = InlineArray[Int64, 2](fill=0)
+    var ts = Array[Int64, 2](fill=0)
     _ = external_call["clock_gettime", Int32](Int32(0), Int(ts.unsafe_ptr()))
     return Int(ts[0])
 

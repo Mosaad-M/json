@@ -1,0 +1,38 @@
+name: Latest Mojo
+# pixi.lock pins the oldest supported Mojo (what test.yml runs). This runs the
+# tests on the newest Mojo release instead, weekly as well, so a Mojo release
+# that breaks the build shows up here before users hit it. Not a required check.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  latest-mojo:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          run-install: false
+
+      - name: Move to the newest Mojo
+        run: |
+          pixi update mojo
+          pixi run mojo --version
+
+      - name: Unit tests
+        run: pixi run test
+
+      - name: JSONTestSuite conformance
+        run: pixi run conformance

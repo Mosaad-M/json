@@ -320,8 +320,8 @@ struct _SeededKey(Copyable, KeyElement, Movable):
     var key: String
 
     def __hash__[H: Hasher](self, mut hasher: H):
-        hasher.update(self.seed)
-        hasher.update(self.key)
+        self.seed.__hash__(hasher)
+        self.key.__hash__(hasher)
 
     def __eq__(self, other: Self) -> Bool:
         return self.key == other.key
@@ -1322,17 +1322,15 @@ struct JsonDoc(Boolable, Copyable, Movable, SizedRaising, Writable):
 
     def _string_at(self, slot: Int) -> String:
         var s = self._slots[slot]
-        var out = String(capacity=s.count())
         var p = self._arena.unsafe_ptr()
         var off = Int(s.payload)
-        out.write(
+        return String(
             StringSlice(
                 unsafe_from_utf8=Span(
                     unsafe_ptr=p.unsafe_offset(off), length=s.count()
                 )
             )
         )
-        return out^
 
     # ------------------------------------------------------------------
     # Conversion to a mutable JsonValue tree (iterative)
@@ -2483,7 +2481,7 @@ def _parse_number(
 
 # BEGIN GENERATED FLOAT TABLES (tools/gen_float_tables.py; do not edit)
 # fmt: off
-comptime _POW5_128: InlineArray[UInt64, 1302] = [
+comptime _POW5_128: Array[UInt64, 1302] = [
     0xEEF453D6923BD65A, 0x113FAA2906A13B3F,  # 5^-342
     0x9558B4661B6565F8, 0x4AC7CA59A424C507,  # 5^-341
     0xBAAEE17FA23EBF76, 0x5D79BCF00D2DF649,  # 5^-340
@@ -3136,7 +3134,7 @@ comptime _POW5_128: InlineArray[UInt64, 1302] = [
     0xE3D8F9E563A198E5, 0x58180FDDD97723A6,  # 5^307
     0x8E679C2F5E44FF8F, 0x570F09EAA7EA7648,  # 5^308
 ]
-comptime _SCHUBFACH_G: InlineArray[UInt64, 1234] = [
+comptime _SCHUBFACH_G: Array[UInt64, 1234] = [
     0x4F0CEDC95A718DD4, 0x5B01E8B09AA0D1B5,  # k = -324
     0x7E7B160EF71C1621, 0x119CA780F767B5EE,  # k = -323
     0x652F44D8C5B011B4, 0x0E16EC672C52F7F2,  # k = -322
