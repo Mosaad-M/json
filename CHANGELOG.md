@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.1.0
 
 ### Changed
 - Requires Mojo >= 1.2.0. Mojo 1.2 renamed `std.hashlib` to `std.hash`, which `json.mojo`
