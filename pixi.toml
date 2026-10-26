@@ -18,4 +18,4 @@ memprobe = "sh tools/memprobe.sh"
 format = "mojo format json.mojo test_json.mojo tools/conformance.mojo tools/fuzz_floats.mojo tools/fuzz_parser.mojo tools/bench.mojo tools/memprobe.mojo"
 
 [dependencies]
-mojo = ">=1.0.0"
+mojo = ">=1.2.0"

@@ -25,8 +25,8 @@ submodule and put it on the import path:
 mojo run -I path/to/json your_program.mojo
 ```
 
-Requires Mojo `>= 1.0.0`. CI runs the tests on Mojo 1.0.0 and on the newest Mojo release
-(1.1.0 as of json 3.0.2).
+Requires Mojo `>= 1.2.0`. CI runs the tests on Mojo 1.2.0 and on the newest Mojo release.
+For Mojo 1.0 / 1.1, use json 3.0.2.
 
 ## Quick start
 
