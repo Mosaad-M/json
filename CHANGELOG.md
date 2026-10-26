@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Requires Mojo >= 1.2.0. Mojo 1.2 renamed `std.hashlib` to `std.hash`, which `json.mojo`
+  imports for `Hasher`; the module path is not available on 1.0/1.1, so those need json 3.0.2.
+  Also uses `ptr()` in place of the deprecated `unsafe_ptr()` in one place.
+
 ## 3.0.2
 
 ### Fixed

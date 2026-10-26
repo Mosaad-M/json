@@ -22,7 +22,7 @@
 from std.bit import count_leading_zeros
 from std.builtin.globals import global_constant
 from std.collections import Dict
-from std.hashlib import Hasher
+from std.hash import Hasher
 from std.math import isinf, isnan
 from std.memory import OwnedPointer, Pointer, bitcast
 from std.memory.alloc import unsafe_alloc
@@ -406,7 +406,7 @@ struct JsonObject(Copyable, Movable, Sized, Writable):
         var n = len(self._keys)
         if n == _INDEX_THRESHOLD:
             var boxed = OwnedPointer(Dict[_SeededKey, Int]())
-            self._seed = _new_seed(Int(boxed.unsafe_ptr()))
+            self._seed = _new_seed(Int(boxed.ptr()))
             for j in range(n):
                 boxed[][_SeededKey(self._seed, self._keys[j])] = j
             self._index = boxed^
